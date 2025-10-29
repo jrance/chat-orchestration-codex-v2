@@ -58,8 +58,9 @@ async def test_compile_success(async_client: AsyncClient):
 
     assert response.status_code == 200
     assert body["ok"] is True
-    assert body["graph_id"] == "planned"
-    assert body["message"] == "Plan ready"
+    assert body["graph_id"].startswith("graph-")
+    assert "Compiled 1 node(s)" in body["message"]
+    assert "entry='agent-1'" in body["message"]
 
 
 @pytest.mark.anyio

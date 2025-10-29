@@ -17,3 +17,10 @@
 2. Agent style guide (`data.styleGuide`).
 3. Expanded system instructions (`data.systemInstructions` with tokens).
 4. Context variables (`data.context.vars` rendered as JSON).
+
+## Compiler Scaffolding
+
+- `app/compiler/builder.py` converts normalized IR plans into LangGraph `StateGraph` apps and wires default fallbacks to `END`.
+- Node compilers live in `app/compiler/nodes/*` and register themselves via `app.compiler.nodes.register`. Call `ensure_builtin_compilers()` before compiling to load core kinds.
+- Add new orchestration kinds by dropping a module under `app/compiler/nodes` and registering a compiler that uses the builder helpers (`add_node`, `register_conditional`).
+- Compiled graphs are cached in-memory with `app/compiler/registry.py`; `/v1/compile` returns the `graph_id` for later execution flows.
