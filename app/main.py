@@ -6,11 +6,16 @@ from app.api.v1.routes_compile import router as compile_router
 from app.api.v1.routes_execute import router as execute_router
 from app.api.v1.routes_validate import router as validate_router
 from app.config.settings import settings
+from app.logging import configure_logging, get_logger
 from app.middleware.request_ids import RequestIdMiddleware
+
+log = get_logger(__name__)
 
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+
+    configure_logging(level=settings.log_level, redact=settings.log_redaction_enabled)
 
     app = FastAPI(
         title=settings.app_name,
@@ -23,6 +28,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
+        log.info("healthcheck", env=settings.app_env, status="ok")
         return {"status": "ok", "env": settings.app_env}
 
     app.include_router(validate_router)

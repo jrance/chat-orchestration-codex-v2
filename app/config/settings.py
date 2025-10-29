@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     default_tenant_id: str = "demo-tenant"
     apigee_client_id: str | None = None
     apigee_token_url: str | None = None
+    log_level: str = "INFO"
+    log_redaction_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
