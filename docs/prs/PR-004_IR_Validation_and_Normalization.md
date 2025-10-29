@@ -17,6 +17,8 @@ Implement full validation for the orchestration **IR** by combining:
 
 Update `/v1/validate` to run both layers, return structured errors/warnings, and—when valid—emit the normalized plan. This sets the stage for PR‑06 (compiler) and PR‑08/09 (execution/streaming).
 
+The orchestration schema can be found at schemas\orchestration_ir.schema.json and examples of valid orchestration packages can be found in schemas\examples. Use the examples to ensure that the LangGraph app compiles correctly.
+
 ## Purpose
 - Guarantee IRs conform to the schema and basic structural invariants before compilation/execution.
 - Produce a normalized view Codex can use to wire the compiler later (node map, edges, agent→tool map).

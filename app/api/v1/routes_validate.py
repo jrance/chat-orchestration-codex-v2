@@ -2,12 +2,24 @@
 
 from fastapi import APIRouter
 
+from app.validation.ir_validator import validate_and_normalize
+
 from .models import OrchestrationPackage, ValidateResponse
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
 
-@router.post("/validate", response_model=ValidateResponse, status_code=501)
+@router.post("/validate", response_model=ValidateResponse)
 async def validate_package(pkg: OrchestrationPackage) -> ValidateResponse:
-    """Stub validation endpoint; detailed validation arrives in later PRs."""
-    return ValidateResponse(ok=False, message="Validation not yet implemented")
+    """Validate an orchestration package and return normalization details."""
+
+    ok, normalized, errors, warnings = validate_and_normalize(pkg.model_dump(exclude_none=True))
+    message = "Valid IR" if ok else "Invalid IR"
+
+    return ValidateResponse(
+        ok=ok,
+        message=message,
+        normalized=normalized if ok else None,
+        errors=errors,
+        warnings=warnings,
+    )

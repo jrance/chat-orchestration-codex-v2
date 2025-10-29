@@ -1,0 +1,165 @@
+{
+  "meta": {
+    "id": "a7e24310-29f6-4d8a-b209-9290fc24c443",
+    "name": "Policy Multi Agent With Sequential Orchestration",
+    "version": "1.0.0",
+    "metadata": {
+      "showToolNodesOnCanvas": true
+    }
+  },
+  "nodes": [
+    {
+      "id": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "kind": "sequential",
+      "label": "Policy Agent",
+      "data": {
+        "breakOn": "Never",
+        "childrenOrder": [
+          "d9349935-bbda-4f97-856f-0b311cd99452",
+          "4562d12a-cf07-49cf-9d70-7f4532e03331"
+        ],
+        "childOverrides": {}
+      }
+    },
+    {
+      "id": "d9349935-bbda-4f97-856f-0b311cd99452",
+      "kind": "agent.codeless",
+      "label": "Policy Retriever Agent",
+      "data": {
+        "systemInstructions": "Retrieve policy data using provided tool necessary to answer user's question.",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4.1",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Auto",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": [
+            "8eaef11e-8aab-4cc5-8615-b2a0a89c3948"
+          ]
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "4562d12a-cf07-49cf-9d70-7f4532e03331",
+      "kind": "agent.codeless",
+      "label": "Answer Generation Agent",
+      "data": {
+        "systemInstructions": "Use the information provided to answer the user's question.",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4.1",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Disabled",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": []
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "8eaef11e-8aab-4cc5-8615-b2a0a89c3948",
+      "kind": "tool",
+      "label": "Policy Search Tool",
+      "data": {
+        "name": "Tool",
+        "toolId": "tool:policy-search",
+        "version": "2.1.0",
+        "parameterOverrides": {}
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "09437627-c499-4639-8ea7-26cf229b8ba7",
+      "from": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "to": "d9349935-bbda-4f97-856f-0b311cd99452"
+    },
+    {
+      "id": "61306cbf-49bd-49eb-9c35-4b4ea4832f55",
+      "from": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "to": "4562d12a-cf07-49cf-9d70-7f4532e03331"
+    },
+    {
+      "id": "a3dfb03a-58f2-4567-a9db-faea9913eb2d",
+      "from": "d9349935-bbda-4f97-856f-0b311cd99452",
+      "to": "8eaef11e-8aab-4cc5-8615-b2a0a89c3948"
+    }
+  ]
+}

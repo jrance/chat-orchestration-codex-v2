@@ -18,7 +18,9 @@ class ValidateResponse(BaseModel):
     """Response envelope for validation requests."""
 
     ok: bool = False
-    message: str = "Not implemented"
+    message: Optional[str] = None
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     normalized: Optional[Dict[str, Any]] = None
 
 
@@ -33,8 +35,15 @@ class CompileResponse(BaseModel):
 class ExecuteRequest(BaseModel):
     """Request payload for execution endpoints."""
 
-    package: OrchestrationPackage
-    input: Dict[str, Any] = Field(default_factory=dict)
+    ir: Dict[str, Any]
+    input: Any | None = None
+    options: Dict[str, Any] | None = None
+
+
+class ResumeRequest(BaseModel):
+    """Request payload when resuming a run."""
+
+    input: Any | None = None
 
 
 class ExecuteResponse(BaseModel):
@@ -42,4 +51,7 @@ class ExecuteResponse(BaseModel):
 
     ok: bool = False
     runId: Optional[str] = None
+    threadId: Optional[str] = None
+    output_text: Optional[str] = None
+    usage: Dict[str, Any] | None = None
     message: str = "Not implemented"

@@ -1,0 +1,382 @@
+{
+  "meta": {
+    "id": "a7e24310-29f6-4d8a-b209-9290fc24c443",
+    "name": "Policy and M365 Data Retrieval",
+    "version": "1.0.0",
+    "metadata": {
+      "showToolNodesOnCanvas": true
+    }
+  },
+  "nodes": [
+    {
+      "id": "39d8e718-812e-4655-9f13-9d4cc0637186",
+      "kind": "router",
+      "label": "Supervisor",
+      "data": {
+        "prompt": "Route to <targets>. Return JSON {target, confidence}.",
+        "minConfidence": 0.5,
+        "tieBreak": "HighestConfidence",
+        "tieBreakPrefer": [],
+        "fallback": {
+          "mode": "AskUserClarify"
+        },
+        "allowBelowMinForTieBreak": false,
+        "routeSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "enum": [
+                "Policy Agent",
+                "M365 Agent"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "rationale": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ]
+        },
+        "telemetry": {
+          "labels": {}
+        },
+        "targets": [
+          "Policy Agent",
+          "M365 Agent"
+        ],
+        "autoSyncEnum": true
+      }
+    },
+    {
+      "id": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "kind": "sequential",
+      "label": "Policy Agent",
+      "data": {
+        "breakOn": "Never",
+        "childrenOrder": [
+          "d9349935-bbda-4f97-856f-0b311cd99452",
+          "4562d12a-cf07-49cf-9d70-7f4532e03331"
+        ],
+        "childOverrides": {}
+      }
+    },
+    {
+      "id": "d9349935-bbda-4f97-856f-0b311cd99452",
+      "kind": "agent.codeless",
+      "label": "Policy Retriever Agent",
+      "data": {
+        "systemInstructions": "Retrieve policy data using provided tool necessary to answer user's question.",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4.1",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Auto",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": [
+            "8eaef11e-8aab-4cc5-8615-b2a0a89c3948"
+          ]
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "4562d12a-cf07-49cf-9d70-7f4532e03331",
+      "kind": "agent.codeless",
+      "label": "Answer Generation Agent",
+      "data": {
+        "systemInstructions": "Use the information provided to answer the user's question.",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4.1",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Disabled",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": []
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "8eaef11e-8aab-4cc5-8615-b2a0a89c3948",
+      "kind": "tool",
+      "label": "Policy Search Tool",
+      "data": {
+        "name": "Tool",
+        "toolId": "tool:policy-search",
+        "version": "2.1.0",
+        "parameterOverrides": {}
+      }
+    },
+    {
+      "id": "414aaa54-054f-420c-aac3-03a0a33194a3",
+      "kind": "concurrent",
+      "label": "M365 Agent",
+      "data": {
+        "maxParallelism": 10,
+        "timeoutSec": 120
+      }
+    },
+    {
+      "id": "6266df25-8b57-48bb-b2fd-d19f76caeec4",
+      "kind": "agent.codeless",
+      "label": "SharePoint Agent",
+      "data": {
+        "systemInstructions": "Retrieve data from SharePoint and answer the user's question",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4o",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Auto",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": [
+            "29e2aeeb-e1d9-4b0c-ba7b-3fb36cae97d5"
+          ]
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "089cf7a6-cd18-4070-aece-9f2c17d2d4a6",
+      "kind": "agent.codeless",
+      "label": "OneDrive Agent",
+      "data": {
+        "systemInstructions": "Retrieve data from OneDrive MCP Server and answer the user's question",
+        "styleGuide": "",
+        "model": {
+          "provider": "openai",
+          "modelId": "gpt-4o",
+          "temperature": 0.3,
+          "topP": 1,
+          "maxTokens": 800,
+          "seed": null,
+          "stop": [],
+          "jsonModeEnabled": false
+        },
+        "context": {
+          "historyWindow": {
+            "mode": "LastN",
+            "n": 10
+          },
+          "injectOrgPreamble": true,
+          "vars": {}
+        },
+        "tools": {
+          "policy": "Auto",
+          "timeoutMs": 10000,
+          "maxCallsPerTurn": 0,
+          "parallelism": 1,
+          "redactPII": true,
+          "attached": []
+        },
+        "structuredOutput": {
+          "enabled": false,
+          "schema": {},
+          "onViolation": "RetryAndRepair",
+          "maxRepairAttempts": 2,
+          "postProcess": {
+            "normalizeWhitespace": true,
+            "ensureMarkdown": true
+          }
+        },
+        "safety": {
+          "policyRef": "enterprise-v3",
+          "onBlock": "Refuse",
+          "piiRedaction": true,
+          "promptInjectionDefense": true
+        },
+        "telemetry": {
+          "labels": {},
+          "emitUsage": true
+        }
+      }
+    },
+    {
+      "id": "29e2aeeb-e1d9-4b0c-ba7b-3fb36cae97d5",
+      "kind": "tool",
+      "label": "SharePoint Search Tool",
+      "data": {
+        "name": "Tool",
+        "toolId": "tool:sharepoint",
+        "version": "3.0.0",
+        "parameterOverrides": {}
+      }
+    },
+    {
+      "id": "0a2cc936-e8e0-4ba5-a562-69f3c770492e",
+      "kind": "mcpServer",
+      "label": "OneDrive MCP Server",
+      "data": {
+        "url": "https://onedrive.mcp.com",
+        "protocol": "mcp/1.0"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "fe5d9625-140b-420b-b0a5-f39050c923fc",
+      "from": "39d8e718-812e-4655-9f13-9d4cc0637186",
+      "to": "5d9e2bba-68b1-41cd-975a-1171545f3df6"
+    },
+    {
+      "id": "255b2334-f76a-4103-b377-5b53a14b06a2",
+      "from": "39d8e718-812e-4655-9f13-9d4cc0637186",
+      "to": "414aaa54-054f-420c-aac3-03a0a33194a3"
+    },
+    {
+      "id": "09437627-c499-4639-8ea7-26cf229b8ba7",
+      "from": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "to": "d9349935-bbda-4f97-856f-0b311cd99452"
+    },
+    {
+      "id": "61306cbf-49bd-49eb-9c35-4b4ea4832f55",
+      "from": "5d9e2bba-68b1-41cd-975a-1171545f3df6",
+      "to": "4562d12a-cf07-49cf-9d70-7f4532e03331"
+    },
+    {
+      "id": "a3dfb03a-58f2-4567-a9db-faea9913eb2d",
+      "from": "d9349935-bbda-4f97-856f-0b311cd99452",
+      "to": "8eaef11e-8aab-4cc5-8615-b2a0a89c3948"
+    },
+    {
+      "id": "6cc51ac2-7b43-4346-bd2c-cb9b9dca4c02",
+      "from": "414aaa54-054f-420c-aac3-03a0a33194a3",
+      "to": "6266df25-8b57-48bb-b2fd-d19f76caeec4"
+    },
+    {
+      "id": "86b2315a-8ccf-40c8-a3ed-19f4cb45b0c8",
+      "from": "414aaa54-054f-420c-aac3-03a0a33194a3",
+      "to": "089cf7a6-cd18-4070-aece-9f2c17d2d4a6"
+    },
+    {
+      "id": "7ca68719-4ed3-4e23-ac96-9c35e9a3716a",
+      "from": "6266df25-8b57-48bb-b2fd-d19f76caeec4",
+      "to": "29e2aeeb-e1d9-4b0c-ba7b-3fb36cae97d5"
+    },
+    {
+      "id": "bc9260aa-98b3-4f94-9821-781e1a0a79a4",
+      "from": "089cf7a6-cd18-4070-aece-9f2c17d2d4a6",
+      "to": "0a2cc936-e8e0-4ba5-a562-69f3c770492e"
+    }
+  ]
+}

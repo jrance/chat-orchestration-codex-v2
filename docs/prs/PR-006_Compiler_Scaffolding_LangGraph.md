@@ -14,6 +14,8 @@ Create a **compiler** that takes the **normalized plan** (from PR‑04/PR‑05) 
 
 Also introduce a minimal **Graph Registry** to store compiled graphs in‑memory by `graph_id`, and extend `/v1/compile` to compile and return a `graph_id` for later execution PRs.
 
+The orchestration schema can be found at schemas\orchestration_ir.schema.json and examples of valid orchestration packages can be found in schemas\examples. Use the examples to ensure that the LangGraph app compiles correctly.
+
 ## Purpose
 - Establish a clean, extensible compiler surface to translate IR nodes into LangGraph nodes/edges.
 - Keep node compilers modular so new orchestration kinds/agents/tools can be added without refactoring.

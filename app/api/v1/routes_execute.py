@@ -1,50 +1,199 @@
-"""Execution endpoints, including SSE streaming stub."""
+"""Execution endpoints including streaming and telemetry support."""
 
-import asyncio
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
-from typing import Any, Mapping
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from .models import ExecuteRequest, ExecuteResponse
-from ...utils.sse import sse_stream
+from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
+from app.config.settings import settings
+from app.runtime.checkpoint import InMemoryCheckpointer
+from app.runtime.engine import ExecutionResult, RunStreamEvent, run_once, run_stream
+from app.sse.streams import SSEMessage, message_stream
+from app.telemetry.models import TelemetryEvent, TelemetryLevel
+from app.telemetry.streamer import (
+    TelemetryStreamConfig,
+    TelemetryStreamer,
+    get_streamer,
+    pop_streamer,
+    register_streamer,
+)
+
+from .models import ExecuteRequest, ExecuteResponse, ResumeRequest
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
-
-@router.post("/execute", response_model=ExecuteResponse, status_code=501)
-async def execute(req: ExecuteRequest) -> ExecuteResponse:  # pragma: no cover - simple stub
-    """Stub synchronous execution endpoint."""
-    return ExecuteResponse(ok=False, message="Execute not yet implemented")
-
-# Future transport usage (PR-08/09 will wire orchestration to the client):
-# from app.http.openai_client import OpenAICompatibleClient
-# await OpenAICompatibleClient().post_responses(..., tenant_id="...", correlation_id="...", request_id="...")
+_CHECKPOINTER = InMemoryCheckpointer()
 
 
-@router.get("/execute/{runId}/resume", response_model=ExecuteResponse, status_code=501)
-async def resume(runId: str) -> ExecuteResponse:  # pragma: no cover - simple stub
-    """Stub resume endpoint for later human-in-the-loop flows."""
-    return ExecuteResponse(ok=False, runId=runId, message="Resume not yet implemented")
+async def _create_context(
+    request: Request,
+    req: ExecuteRequest,
+) -> tuple[ExecutionContext, Optional[TelemetryStreamer]]:
+    headers = parse_execution_headers(request)
+    ensure_tenant_matches(req.ir, headers.tenant_id)
+
+    context = ExecutionContext(headers=headers)
+    context.ensure_run_ids()
+
+    telemetry: Optional[TelemetryStreamer] = None
+    if headers.telemetry is not TelemetryLevel.NONE:
+        config = TelemetryStreamConfig(
+            run_id=context.run_id or "",
+            level=headers.telemetry,
+            redact=settings.log_redaction_enabled,
+        )
+        telemetry = TelemetryStreamer(config)
+        await register_streamer(telemetry)
+
+    return context, telemetry
+
+
+async def _finalize_telemetry(
+    context: ExecutionContext,
+    telemetry: Optional[TelemetryStreamer],
+    *,
+    remove: bool = True,
+) -> None:
+    if telemetry is None:
+        return
+    await telemetry.publish(
+        TelemetryEvent(event="telemetry.stream_closed", payload={"runId": context.run_id}),
+    )
+    await telemetry.close()
+    if remove:
+        await pop_streamer(context.run_id or "")
+
+
+async def _save_checkpoint(result: ExecutionResult) -> None:
+    await _CHECKPOINTER.save_state(
+        result.run_id,
+        {
+            "thread_id": result.thread_id,
+            "output_text": result.output_text,
+            "usage": result.usage,
+        },
+    )
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+async def execute(request: Request, req: ExecuteRequest) -> ExecuteResponse:
+    context, telemetry = await _create_context(request, req)
+    result = await run_once(req.ir, req.input, context, telemetry)
+    await _save_checkpoint(result)
+    await _finalize_telemetry(context, telemetry)
+
+    return ExecuteResponse(
+        ok=True,
+        runId=result.run_id,
+        threadId=result.thread_id,
+        output_text=result.output_text,
+        usage=result.usage,
+        message="completed",
+    )
+
+
+async def _stream_response_events(
+    req: ExecuteRequest,
+    context: ExecutionContext,
+    telemetry: Optional[TelemetryStreamer],
+) -> AsyncIterator[SSEMessage]:
+    last_completed: Optional[RunStreamEvent] = None
+    async for event in run_stream(req.ir, req.input, context, telemetry):
+        if event.event == "response.completed":
+            last_completed = event
+        yield SSEMessage(event=event.event, data=event.data)
+
+    if last_completed is not None:
+        payload = last_completed.data
+        result = ExecutionResult(
+            run_id=context.run_id or "",
+            thread_id=context.thread_id or "",
+            output_text=str(payload.get("output_text", "")),
+            usage=dict(payload.get("usage", {})),
+            response=payload,
+        )
+        await _save_checkpoint(result)
+
+    await _finalize_telemetry(context, telemetry, remove=False)
 
 
 @router.post("/execute/stream")
-async def execute_stream(
-    req: ExecuteRequest,
-    x_telemetry: str | None = Header(default=None, alias="X-Telemetry"),
-) -> StreamingResponse:
-    """Stub SSE endpoint to verify streaming plumbing."""
+async def execute_stream(request: Request, req: ExecuteRequest) -> StreamingResponse:
+    context, telemetry = await _create_context(request, req)
 
-    async def gen() -> AsyncIterator[Mapping[str, Any]]:
-        yield {"event": "response.created", "data": '{"status":"starting"}'}
-        await asyncio.sleep(0.01)
-        yield {"event": "response.output_text.delta", "data": "streaming ready..."}
-        await asyncio.sleep(0.01)
-        yield {"event": "response.completed", "data": '{"status":"done"}'}
+    headers: Dict[str, str] = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    if telemetry and telemetry.enabled():
+        headers["X-Telemetry-Stream-Url"] = f"/v1/telemetry/stream?runId={context.run_id}"
+
+    iterator = _stream_response_events(req, context, telemetry)
+    return StreamingResponse(
+        message_stream(iterator, heartbeat_interval=10.0),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+@router.post("/execute/{runId}/resume", response_model=ExecuteResponse)
+async def resume(request: Request, runId: str, body: ResumeRequest) -> ExecuteResponse:
+    parse_execution_headers(request)  # Ensures required headers are present
+    state = await _CHECKPOINTER.load_state(runId)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    output_text = str(state.get("output_text", ""))
+    if body.input:
+        supplement = _flatten_input(body.input)
+        if supplement:
+            output_text = f"{output_text}\n{supplement}".strip()
+
+    usage = dict(state.get("usage", {}))
+
+    return ExecuteResponse(
+        ok=True,
+        runId=runId,
+        threadId=str(state.get("thread_id", "")),
+        output_text=output_text,
+        usage=usage,
+        message="resumed",
+    )
+
+
+@router.get("/telemetry/stream")
+async def telemetry_stream(request: Request, runId: str) -> StreamingResponse:
+    parse_execution_headers(request)  # Validation only
+    streamer = await get_streamer(runId)
+    if streamer is None or not streamer.enabled():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Telemetry stream not available",
+        )
+
+    async def iterator() -> AsyncIterator[SSEMessage]:
+        async for event in streamer.stream():
+            yield SSEMessage(event=event.event, data=event.payload)
+        await pop_streamer(runId)
 
     return StreamingResponse(
-        sse_stream(gen()),
+        message_stream(iterator(), heartbeat_interval=10.0),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+def _flatten_input(user_input: Any) -> str:
+    if user_input is None:
+        return ""
+    if isinstance(user_input, str):
+        return user_input
+    if isinstance(user_input, dict):
+        return " ".join(f"{key}:{_flatten_input(value)}" for key, value in user_input.items())
+    if isinstance(user_input, (list, tuple, set)):
+        return " ".join(_flatten_input(item) for item in user_input)
+    return str(user_input)

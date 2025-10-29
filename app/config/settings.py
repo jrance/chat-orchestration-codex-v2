@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     http_retry_max_attempts: int = 3
     http_retry_base_delay: float = 0.2
 
+    # Validation (PR-04)
+    orch_schema_path: str = "schemas/orchestration_ir.schema.json"
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     def apigee_extra_headers(self) -> dict[str, Any]:
