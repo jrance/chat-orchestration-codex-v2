@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import AsyncIterator
 from typing import Any, Dict, Optional
 
@@ -10,8 +11,8 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
 from app.config.settings import settings
-from app.runtime.checkpoint import InMemoryCheckpointer
 from app.runtime.engine import ExecutionResult, RunStreamEvent, run_once, run_stream
+from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.sse.streams import SSEMessage, message_stream
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streamer import (
@@ -26,7 +27,7 @@ from .models import ExecuteRequest, ExecuteResponse, ResumeRequest
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
-_CHECKPOINTER = InMemoryCheckpointer()
+_RUN_STATE_STORE = get_run_state_store()
 
 
 async def _create_context(
@@ -68,22 +69,37 @@ async def _finalize_telemetry(
         await pop_streamer(context.run_id or "")
 
 
-async def _save_checkpoint(result: ExecutionResult) -> None:
-    await _CHECKPOINTER.save_state(
-        result.run_id,
-        {
-            "thread_id": result.thread_id,
-            "output_text": result.output_text,
-            "usage": result.usage,
+async def _persist_run_state(result: ExecutionResult) -> None:
+    if not result.run_id:
+        return
+
+    prior = _RUN_STATE_STORE.get_state(result.run_id)
+    metadata: Dict[str, Any] = {}
+    if prior:
+        metadata.update(copy.deepcopy(prior.metadata))
+    metadata["thread_id"] = result.thread_id
+    metadata["response"] = copy.deepcopy(result.response)
+    metadata["invocations"] = int(metadata.get("invocations", 0)) + 1
+
+    payload = RunStateRecord(
+        run_id=result.run_id,
+        state={
+            "run_id": result.run_id,
+            "result": {
+                "output_text": result.output_text,
+                "usage": dict(result.usage),
+            },
         },
+        metadata=metadata,
     )
+    _RUN_STATE_STORE.put_state(payload)
 
 
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute(request: Request, req: ExecuteRequest) -> ExecuteResponse:
     context, telemetry = await _create_context(request, req)
     result = await run_once(req.ir, req.input, context, telemetry)
-    await _save_checkpoint(result)
+    await _persist_run_state(result)
     await _finalize_telemetry(context, telemetry)
 
     return ExecuteResponse(
@@ -116,7 +132,7 @@ async def _stream_response_events(
             usage=dict(payload.get("usage", {})),
             response=payload,
         )
-        await _save_checkpoint(result)
+        await _persist_run_state(result)
 
     await _finalize_telemetry(context, telemetry, remove=False)
 
@@ -143,22 +159,23 @@ async def execute_stream(request: Request, req: ExecuteRequest) -> StreamingResp
 @router.post("/execute/{runId}/resume", response_model=ExecuteResponse)
 async def resume(request: Request, runId: str, body: ResumeRequest) -> ExecuteResponse:
     parse_execution_headers(request)  # Ensures required headers are present
-    state = await _CHECKPOINTER.load_state(runId)
-    if state is None:
+    record = _RUN_STATE_STORE.get_state(runId)
+    if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    output_text = str(state.get("output_text", ""))
+    result_block = record.state.get("result", {})
+    output_text = str(result_block.get("output_text", ""))
     if body.input:
         supplement = _flatten_input(body.input)
         if supplement:
             output_text = f"{output_text}\n{supplement}".strip()
 
-    usage = dict(state.get("usage", {}))
+    usage = dict(result_block.get("usage", {}))
 
     return ExecuteResponse(
         ok=True,
         runId=runId,
-        threadId=str(state.get("thread_id", "")),
+        threadId=str(record.metadata.get("thread_id", "")),
         output_text=output_text,
         usage=usage,
         message="resumed",

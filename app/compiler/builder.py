@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from langgraph.graph import END, StateGraph
 
+from app.runtime.checkpointer import get_checkpointer
+
 from .nodes import ensure_builtin_compilers, get as get_compiler
 from .types import OrchestratorState
 
@@ -127,4 +129,9 @@ class GraphBuilder:
         self.compile_nodes()
         self.compile_edges()
         self.graph.set_entry_point(self.entry_id)
-        return self.graph.compile()
+
+        try:
+            checkpointer = get_checkpointer().get_saver()
+        except RuntimeError:
+            return self.graph.compile()
+        return self.graph.compile(checkpointer=checkpointer)

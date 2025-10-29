@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     org_preamble_path: str | None = "docs/org_preamble.md"
     org_preamble_text: str | None = None
 
+    # Runtime persistence configuration (PR-07)
+    checkpointer_kind: str = "memory"
+    run_store_kind: str = "memory"
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     def apigee_extra_headers(self) -> dict[str, Any]:

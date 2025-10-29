@@ -24,3 +24,9 @@
 - Node compilers live in `app/compiler/nodes/*` and register themselves via `app.compiler.nodes.register`. Call `ensure_builtin_compilers()` before compiling to load core kinds.
 - Add new orchestration kinds by dropping a module under `app/compiler/nodes` and registering a compiler that uses the builder helpers (`add_node`, `register_conditional`).
 - Compiled graphs are cached in-memory with `app/compiler/registry.py`; `/v1/compile` returns the `graph_id` for later execution flows.
+
+## Runtime Persistence
+
+- LangGraph checkpointing is resolved via `app.runtime.checkpointer.get_checkpointer()`, which defaults to the in-memory `MemorySaver`. Override `CHECKPOINTER_KIND` to swap implementations (e.g., Redis/SQL) after registering them with the factory.
+- Run state persistence uses `app.runtime.state_store.get_run_state_store()`; the default `InMemoryRunStateStore` copies state and metadata for safe reuse. Provide alternate backends and expose them through the factory keyed by `RUN_STORE_KIND`.
+- The runtime engine (`app.runtime.engine`) injects the active checkpointer during compilation and persists orchestrator state after each execution, enabling resume/retry without rewriting compiler or API layers.
