@@ -1,5 +1,10 @@
 """Environment-driven application settings."""
 
+from __future__ import annotations
+
+import json
+from typing import Any
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,12 +17,48 @@ class Settings(BaseSettings):
     app_port: int = 8000
 
     default_tenant_id: str = "demo-tenant"
-    apigee_client_id: str | None = None
-    apigee_token_url: str | None = None
+
+    # Logging (from PR-02)
     log_level: str = "INFO"
     log_redaction_enabled: bool = False
 
+    # Apigee / OpenAI-compatible gateway
+    apigee_token_url: str | None = None
+    apigee_client_id: str | None = None
+    apigee_client_secret: str | None = None
+    apigee_scopes: str = "openid"
+    openai_base_url: str | None = None
+    apigee_extra_headers_json: str | None = None
+
+    # HTTP client tuning
+    http_connect_timeout: float = 5.0
+    http_read_timeout: float = 60.0
+    http_write_timeout: float = 60.0
+    http_pool_max_connections: int = 100
+    http_pool_max_keepalive: int = 20
+    http_retry_max_attempts: int = 3
+    http_retry_base_delay: float = 0.2
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+
+    def apigee_extra_headers(self) -> dict[str, Any]:
+        """Return configured static headers to include with every Apigee call."""
+        if not self.apigee_extra_headers_json:
+            return {}
+        try:
+            loaded = json.loads(self.apigee_extra_headers_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        return {str(k): str(v) for k, v in loaded.items()}
 
 
 settings = Settings()
+
+
+def reload_settings() -> Settings:
+    """Reload settings from the environment in-place (useful during testing)."""
+    new_settings = Settings()
+    settings.__dict__.update(new_settings.__dict__)
+    return settings

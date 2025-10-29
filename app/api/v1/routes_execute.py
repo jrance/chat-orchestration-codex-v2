@@ -18,6 +18,10 @@ async def execute(req: ExecuteRequest) -> ExecuteResponse:  # pragma: no cover -
     """Stub synchronous execution endpoint."""
     return ExecuteResponse(ok=False, message="Execute not yet implemented")
 
+# Future transport usage (PR-08/09 will wire orchestration to the client):
+# from app.http.openai_client import OpenAICompatibleClient
+# await OpenAICompatibleClient().post_responses(..., tenant_id="...", correlation_id="...", request_id="...")
+
 
 @router.get("/execute/{runId}/resume", response_model=ExecuteResponse, status_code=501)
 async def resume(runId: str) -> ExecuteResponse:  # pragma: no cover - simple stub

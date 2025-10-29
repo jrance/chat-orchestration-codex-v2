@@ -22,4 +22,9 @@ Open http://127.0.0.1:8000/docs
 - GET `/v1/execute/{runId}/resume`
 - POST `/v1/execute/stream` (SSE demo)
 
+## Apigee/OpenAI Gateway Client
+- Configure Apigee and OpenAI-compatible endpoints via `.env` (see tokens, base URL, and HTTP tuning knobs in `.env.example`).
+- `app.http.openai_client.OpenAICompatibleClient` wraps HTTPX with pooled connections, OAuth token caching, default headers, and retries for 429/5xx.
+- `post_responses()` sends JSON to `/responses`; streaming helpers arrive in later PRs.
+
 Next PRs add validation, compilation to LangGraph, execution, streaming mapping to Responses API, and telemetry.
