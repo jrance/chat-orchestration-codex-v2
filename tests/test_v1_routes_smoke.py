@@ -17,8 +17,49 @@ async def test_validate_stub(async_client: AsyncClient):
 @pytest.mark.anyio
 async def test_compile_stub(async_client: AsyncClient):
     response = await async_client.post("/v1/compile", json=PKG)
-    assert response.status_code == 501
-    assert response.json()["ok"] is False
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["message"]
+
+
+@pytest.mark.anyio
+async def test_compile_success(async_client: AsyncClient):
+    agent_node = {
+        "id": "agent-1",
+        "kind": "agent.codeless",
+        "label": "Agent",
+        "data": {
+            "systemInstructions": "Hello {tenant_id}",
+            "styleGuide": "Brief",
+            "model": {
+                "provider": "openai",
+                "modelId": "gpt-4o",
+                "temperature": 0.1,
+                "topP": 1,
+                "maxTokens": 32,
+            },
+            "context": {
+                "injectOrgPreamble": False,
+                "historyWindow": {"mode": "LastN", "n": 3},
+            },
+            "tools": {"policy": "Disabled", "attached": []},
+        },
+    }
+    pkg = {
+        "meta": {"id": "demo", "name": "demo", "version": "1.0.0"},
+        "nodes": [agent_node],
+        "edges": [],
+        "entryId": "agent-1",
+    }
+
+    response = await async_client.post("/v1/compile", json=pkg)
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["graph_id"] == "planned"
+    assert body["message"] == "Plan ready"
 
 
 @pytest.mark.anyio

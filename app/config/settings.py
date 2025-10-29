@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Validation (PR-04)
     orch_schema_path: str = "schemas/orchestration_ir.schema.json"
 
+    # Prompt preamble configuration (PR-05)
+    org_preamble_path: str | None = "docs/org_preamble.md"
+    org_preamble_text: str | None = None
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     def apigee_extra_headers(self) -> dict[str, Any]:
