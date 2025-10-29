@@ -1,0 +1,361 @@
+	{
+	  "$id": "https://example.com/agent-builder/ir.schema.json",
+	  "$schema": "https://json-schema.org/draft/2020-12/schema",
+	  "title": "Agent Builder IR",
+	  "type": "object",
+	  "required": ["meta", "nodes", "edges"],
+	  "properties": {
+	    "meta": {
+	      "type": "object",
+	      "required": ["id", "name", "version"],
+	      "properties": {
+	        "id": { "type": "string" },
+	        "name": { "type": "string" },
+	        "version": { "type": "string" },
+	        "tenantId": { "type": "string" },
+	        "metadata": { "type": "object", "additionalProperties": true },
+	        "draft": { "type": "boolean" }
+	      },
+	      "additionalProperties": true
+	    },
+	    "nodes": {
+	      "type": "array",
+	      "items": { "$ref": "#/$defs/Node" }
+	    },
+	    "edges": {
+	      "type": "array",
+	      "items": { "$ref": "#/$defs/Edge" }
+	    },
+	    "entryId": { "type": "string" }
+	  },
+	  "$defs": {
+	    "BaseNode": {
+	      "type": "object",
+	      "required": ["id", "kind", "label"],
+	      "properties": {
+	        "id": { "type": "string" },
+	        "kind": { "type": "string" },
+	        "label": { "type": "string" },
+	        "description": { "type": "string" }
+	      },
+	      "additionalProperties": true
+	    },
+	    "RouterNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "router" },
+	            "data": {
+	              "type": "object",
+	              "required": ["routeSchema", "minConfidence", "prompt"],
+	              "properties": {
+	                "prompt": { "type": "string" },
+	                "minConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+	                "tieBreak": { "enum": ["HighestConfidence", "DeterministicOrder", "PreferList"] },
+	                "tieBreakPrefer": { "type": "array", "items": { "type": "string" } },
+	                "fallback": {
+	                  "type": "object",
+	                  "properties": {
+	                    "mode": { "enum": ["AskUserClarify", "DefaultChild", "SafeAgent", "Error"] },
+	                    "defaultChild": { "type": "string" }
+	                  },
+	                  "required": ["mode"]
+	                },
+	                "allowBelowMinForTieBreak": { "type": "boolean" },
+	                "routeSchema": { "type": "object", "additionalProperties": true },
+	                "telemetry": { "type": "object", "properties": { "labels": { "type": "object", "additionalProperties": { "type": "string" } } } },
+	                "targets": { "type": "array", "items": { "type": "string" } },
+	                "autoSyncEnum": { "type": "boolean" }
+	              },
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "SequentialNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "sequential" },
+	            "data": {
+	              "type": "object",
+	              "properties": {
+	                "breakOn": { "enum": ["Never", "OnFirstAnswer", "HighConfidence"] }
+	              },
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "ConcurrentNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "concurrent" },
+	            "data": {
+	              "type": "object",
+	              "properties": {
+	                "timeoutSeconds": { "type": "number", "minimum": 0 },
+	                "merge": {
+	                  "type": "object",
+	                  "properties": {
+	                    "strategy": { "enum": ["Synthesize", "HighestScore", "FirstBest"] },
+	                    "synthPrompt": { "type": "string" }
+	                  },
+	                  "required": ["strategy"],
+	                  "additionalProperties": true
+	                }
+	              },
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "GroupChatNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "groupchat" },
+	            "data": {
+	              "type": "object",
+	              "properties": {
+	                "moderatorPrompt": { "type": "string" },
+	                "maxTurns": { "type": "number", "minimum": 1 },
+	                "stopWhen": { "enum": ["ModeratorSatisfied", "AllAgree"] }
+	              },
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "CodelessAgentNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "agent.codeless" },
+	            "data": {
+	              "type": "object",
+	              "required": ["systemInstructions", "model"],
+	              "properties": {
+	                "systemInstructions": { "type": "string" },
+	                "styleGuide": { "type": "string" },
+	                "model": {
+	                  "type": "object",
+	                  "required": ["provider", "modelId", "temperature", "topP", "maxTokens"],
+	                  "properties": {
+	                    "provider": { "enum": ["openai", "azureopenai", "bedrock", "ollama", "other"] },
+	                    "modelId": { "type": "string" },
+	                    "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+	                    "topP": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+	                    "maxTokens": { "type": "integer", "minimum": 1 },
+	                    "seed": { "type": ["integer", "null"] },
+	                    "stop": { "type": "array", "items": { "type": "string" } },
+	                    "jsonModeEnabled": { "type": "boolean" }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "context": {
+	                  "type": "object",
+	                  "properties": {
+	                    "historyWindow": {
+	                      "type": "object",
+	                      "properties": {
+	                        "mode": { "enum": ["None", "LastN", "TimeBounded"] },
+	                        "n": { "type": "integer", "minimum": 0 },
+	                        "durationMs": { "type": "integer", "minimum": 0 }
+	                      },
+	                      "required": ["mode"],
+	                      "additionalProperties": true
+	                    },
+	                    "injectOrgPreamble": { "type": "boolean" },
+	                    "vars": { "type": "object", "additionalProperties": { "type": "string" } }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "tools": {
+	                  "type": "object",
+	                  "properties": {
+	                    "policy": { "enum": ["Disabled", "Auto", "AlwaysAsk", "Heuristic"] },
+	                    "timeoutMs": { "type": "integer", "minimum": 0 },
+	                    "maxCallsPerTurn": { "type": "integer", "minimum": 0 },
+	                    "parallelism": { "type": "integer", "minimum": 1 },
+	                    "redactPII": { "type": "boolean" },
+	                    "attached": { "type": "array", "items": { "type": "string" } }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "structuredOutput": {
+	                  "type": "object",
+	                  "properties": {
+	                    "enabled": { "type": "boolean" },
+	                    "schema": { "type": "object" },
+	                    "onViolation": { "enum": ["RetryAndRepair", "ReturnError", "BestEffort"] },
+	                    "maxRepairAttempts": { "type": "integer", "minimum": 0 },
+	                    "postProcess": {
+	                      "type": "object",
+	                      "properties": {
+	                        "normalizeWhitespace": { "type": "boolean" },
+	                        "ensureMarkdown": { "type": "boolean" },
+	                        "appendCitationsBlock": { "type": "boolean" }
+	                      },
+	                      "additionalProperties": true
+	                    }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "safety": {
+	                  "type": "object",
+	                  "properties": {
+	                    "policyRef": { "type": "string" },
+	                    "onBlock": { "enum": ["Refuse", "SafeAgent", "AskForClarification"] },
+	                    "safeAgentRef": { "type": "string" },
+	                    "piiRedaction": { "type": "boolean" },
+	                    "promptInjectionDefense": { "type": "boolean" }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "telemetry": { "type": "object", "properties": { "labels": { "type": "object", "additionalProperties": { "type": "string" } }, "emitUsage": { "type": "boolean" } }, "additionalProperties": true }
+	              },
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "BYOEAgentNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "agent.byoe" },
+	            "data": { "type": "object", "additionalProperties": true }
+	          }
+	        }
+	      ]
+	    },
+	    "RemoteAgentNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "agent.remote" },
+	            "data": { "type": "object", "additionalProperties": true }
+	          }
+	        }
+	      ]
+	    },
+	    "ToolNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "tool" },
+	            "data": {
+	              "type": "object",
+	              "properties": {
+	                "name": { "type": "string" },
+	                "argsSchema": { "type": "object" }
+	              },
+	              "required": ["name"],
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "OutputNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "output" },
+	            "data": { "type": "object" }
+	          }
+	        }
+	      ]
+	    },
+	    "MCPServerNode": {
+	      "allOf": [
+	        { "$ref": "#/$defs/BaseNode" },
+	        {
+	          "type": "object",
+	          "properties": {
+	            "kind": { "const": "mcpServer" },
+	            "data": {
+	              "type": "object",
+	              "properties": {
+	                "url": { "type": "string" },
+	                "protocol": { "type": "string" },
+	                "auth": {
+	                  "type": "object",
+	                  "properties": {
+	                    "type": { "enum": ["OBO", "client_credentials", "api_key", "mtls"] },
+	                    "scopes": { "type": "array", "items": { "type": "string" } },
+	                    "secretRef": { "type": ["string", "null"] }
+	                  },
+	                  "additionalProperties": true
+	                },
+	                "capabilities": {
+	                  "type": "object",
+	                  "properties": {
+	                    "tools": { "type": "boolean" },
+	                    "resources": { "type": "boolean" },
+	                    "prompts": { "type": "boolean" },
+	                    "sampling": { "type": "boolean" }
+	                  }
+	                },
+	                "namespaceFilter": { "type": "array", "items": { "type": "string" } },
+	                "metadata": { "type": "object" }
+	              },
+	              "required": ["url", "protocol"],
+	              "additionalProperties": true
+	            }
+	          }
+	        }
+	      ]
+	    },
+	    "Node": {
+	      "oneOf": [
+	        { "$ref": "#/$defs/RouterNode" },
+	        { "$ref": "#/$defs/SequentialNode" },
+	        { "$ref": "#/$defs/ConcurrentNode" },
+	        { "$ref": "#/$defs/GroupChatNode" },
+	        { "$ref": "#/$defs/CodelessAgentNode" },
+	        { "$ref": "#/$defs/BYOEAgentNode" },
+	        { "$ref": "#/$defs/RemoteAgentNode" },
+	        { "$ref": "#/$defs/ToolNode" },
+	        { "$ref": "#/$defs/MCPServerNode" },
+	        { "$ref": "#/$defs/OutputNode" }
+	      ]
+	    },
+	    "Edge": {
+	      "type": "object",
+	      "required": ["id", "from", "to"],
+	      "properties": {
+	        "id": { "type": "string" },
+	        "from": { "type": "string" },
+	        "to": { "type": "string" },
+	        "label": { "type": "string" }
+	      },
+	      "additionalProperties": false
+	    }
+	  }
+    }
