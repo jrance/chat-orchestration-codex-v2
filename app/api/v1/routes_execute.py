@@ -10,12 +10,13 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
+from app.api.models import TelemetryLevel
 from app.config.settings import settings
 from app.ir.loader import build_runtime_plan
 from app.runtime.engine import ExecutionResult, RunStreamEvent, run_once, run_stream
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.sse.streams import SSEMessage, message_stream
-from app.telemetry.models import TelemetryEvent, TelemetryLevel
+from app.telemetry.models import TelemetryEvent
 from app.telemetry.streamer import (
     TelemetryStreamConfig,
     TelemetryStreamer,

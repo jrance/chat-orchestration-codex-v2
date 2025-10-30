@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Mapping
 
-
-class TelemetryLevel(str, Enum):
-    """Supported telemetry verbosity levels."""
-
-    NONE = "none"
-    BASIC = "basic"
-    VERBOSE = "verbose"
+from app.api.models import TelemetryLevel
 
 
 @dataclass(slots=True)
@@ -37,4 +30,3 @@ def redact_payload(payload: Mapping[str, Any], redact_enabled: bool) -> dict[str
         else:
             redacted[key] = "[redacted]"
     return redacted
-

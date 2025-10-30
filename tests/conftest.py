@@ -38,7 +38,11 @@ def stub_llm(monkeypatch: pytest.MonkeyPatch):
             "usage": {"output_tokens": 1},
         }
 
+    async def _router_stub(*_args, **_kwargs):
+        return {}, {"output_text": '{"target": "seq", "confidence": 0.9}'}
+
     monkeypatch.setattr("app.runtime.agents.codeless.invoke_llm", _invoke)
     monkeypatch.setattr("app.runtime.engine.stream_codeless", _stream)
+    monkeypatch.setattr("app.runtime.patterns.router.run_router_llm", _router_stub)
 
     return _invoke
