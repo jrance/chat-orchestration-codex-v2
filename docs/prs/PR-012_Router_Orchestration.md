@@ -4,39 +4,39 @@ Implement the following PR and validate that everything has been completed fully
 
 ---
 
-# PR-12 of 14 — Router Orchestration (LLM JSON‑routing, tie‑break, fallbacks)
+# PR-12 of 14 - Router Orchestration (LLM JSON-routing, tie-break, fallbacks)
 
 ## PR Title
-Implement Router orchestration with JSON‑schema routing, tie‑break strategies, and fallbacks (PR 12 of 14)
+Implement Router orchestration with JSON-schema routing, tie-break strategies, and fallbacks (PR 12 of 14)
 
 ## Description
-This PR adds a **Router** orchestration node that uses an LLM classification step (via our OpenAI‑compatible `/v1/responses`) to choose which child node to execute next. The router uses a JSON **routeSchema** with `{target, confidence, rationale}` and supports **minConfidence**, **allowBelowMinForTieBreak**, and three **tieBreak** strategies:
+This PR adds a **Router** orchestration node that uses an LLM classification step (via our OpenAI-compatible `/v1/responses`) to choose which child node to execute next. The router uses a JSON **routeSchema** with `{target, confidence, rationale}` and supports **minConfidence**, **allowBelowMinForTieBreak**, and three **tieBreak** strategies:
 
-- **HighestConfidence** — choose the highest `confidence` ≥ `minConfidence` (or all if `allowBelowMinForTieBreak=true`).
-- **DeterministicOrder** — choose the first eligible child in a stable order.
-- **PreferList** — choose the first eligible child that appears in `tieBreakPrefer`.
+- **HighestConfidence** - choose the highest `confidence` >= `minConfidence` (or all if `allowBelowMinForTieBreak=true`).
+- **DeterministicOrder** - choose the first eligible child in a stable order.
+- **PreferList** - choose the first eligible child that appears in `tieBreakPrefer`.
 
 Fallback modes are supported:
-- **AskUserClarify** — pause the run and return metadata that the UI can use to ask a follow‑up question. The run may be resumed with `POST /v1/execute/{runId}/resume`.
-- **DefaultChild** — route to `fallback.defaultChild`.
-- **SafeAgent** — route to a designated safe agent (by label or id).
-- **Error** — raise a `ROUTER_NO_ROUTE` orchestration error.
+- **AskUserClarify** - pause the run and return metadata that the UI can use to ask a follow-up question. The run may be resumed with `POST /v1/execute/{runId}/resume`.
+- **DefaultChild** - route to `fallback.defaultChild`.
+- **SafeAgent** - route to a designated safe agent (by label or id).
+- **Error** - raise a `ROUTER_NO_ROUTE` orchestration error.
 
-The router **auto‑syncs** the `routeSchema.properties.target.enum` from the set of child labels when `autoSyncEnum=true`, and validates that all targets are valid & reachable.
+The router **auto-syncs** the `routeSchema.properties.target.enum` from the set of child labels when `autoSyncEnum=true`, and validates that all targets are valid & reachable.
 
 The orchestration schema can be found at schemas\orchestration_ir.schema.json and examples of valid orchestration packages can be found in schemas\examples. Use the examples to ensure that the LangGraph app compiles correctly.
 
 ## Purpose
-- Cleanly separate routing logic from child execution with a consistent JSON‑based contract.
-- Provide deterministic behavior under ambiguity via tie‑breakers and clear fallbacks.
+- Cleanly separate routing logic from child execution with a consistent JSON-based contract.
+- Provide deterministic behavior under ambiguity via tie-breakers and clear fallbacks.
 - Keep the design extensible and testable (mockable LLM helper, pure decision function).
 
 ## Scope
 - Compiler: normalize router config; derive targets; validate topology.
 - Provider: small helper to run the routing LLM call with `response_format: json_schema`.
-- Runtime: router decision + integration with engine; pause/resume for “AskUserClarify”.
+- Runtime: router decision + integration with engine; pause/resume for "AskUserClarify".
 - Telemetry: events for router start/decision/fallback.
-- Tests: tie‑break paths, minConfidence, allowBelowMinForTieBreak, fallbacks, autoSyncEnum.
+- Tests: tie-break paths, minConfidence, allowBelowMinForTieBreak, fallbacks, autoSyncEnum.
 
 ---
 
@@ -44,26 +44,37 @@ The orchestration schema can be found at schemas\orchestration_ir.schema.json an
 
 ```
 app/
-├─ compiler/nodes/router.py                 # NEW: normalize + validate + build runtime plan
-├─ providers/openai_like/route.py           # NEW: run routing LLM call (json_schema)
-├─ runtime/patterns/router.py               # NEW: pure decision & tie-break logic
-├─ runtime/engine.py                        # MOD: integrate router execution & pause
-├─ runtime/types.py                         # MOD: RouterDecision type, pause metadata
-├─ telemetry/events.py                      # MOD: add router event constants
+|-- compiler/nodes/router.py                 # NEW: normalize + validate + build runtime plan
+|-- providers/openai_like/route.py           # NEW: run routing LLM call (json_schema)
+|-- runtime/patterns/router.py               # NEW: pure decision & tie-break logic
+|-- runtime/engine.py                        # MOD: integrate router execution & pause
+|-- runtime/types.py                         # MOD: RouterDecision type, pause metadata
+|-- telemetry/events.py                      # MOD: add router event constants
 tests/
-├─ runtime/test_router_highest_conf.py
-├─ runtime/test_router_deterministic_order.py
-├─ runtime/test_router_prefer_list.py
-├─ runtime/test_router_fallbacks.py
-├─ runtime/test_router_autosync_enum.py
+|-- runtime/test_router_highest_conf.py
+|-- runtime/test_router_deterministic_order.py
+|-- runtime/test_router_prefer_list.py
+|-- runtime/test_router_fallbacks.py
+|-- runtime/test_router_autosync_enum.py
 docs/
-└─ ROUTER_ORCHESTRATION.md                  # NEW: behavior, config table, examples
+|-- ROUTER_ORCHESTRATION.md                  # NEW: behavior, config table, examples
 ```
 > NOTE: Filenames reflect the current package layout used in previous PRs. If names differ in your tree, adapt accordingly.
 
 ---
 
-## IR → Runtime normalization
+## Current Repo Snapshot (WIP)
+- `app/ir/loader.py` already contains `_normalize_router_nodes`; verify enum auto-sync, fallback resolution, and target-to-child mapping against the schema rules.
+- `app/compiler/nodes/router.py` is registered and expects `runtimeRouter[node_id]`; keep builder wiring stable while adjusting normalization outputs.
+- `app/providers/openai_like/route.py` currently wraps `create_response` and returns `(payload, provider_response)`; add telemetry hooks and retry handling as needed.
+- `app/runtime/patterns/router.py` implements `RouterConfig`, `choose_target`, `_apply_fallback`, and `build_router_runner`; double-check pause metadata and telemetry payloads while iterating.
+- `app/runtime/engine.py` stores router decisions in `response.metadata.router` and respects pause metadata; ensure this matches the runner contract once logic settles.
+- Tests folder only has `tests/runtime/test_router_highest_conf.py`; the remaining scenarios listed below still require coverage.
+- `docs/ROUTER_ORCHESTRATION.md` has not been authored yet; plan to create it before closing the PR.
+
+---
+
+## IR -> Runtime normalization
 
 Given IR (excerpt):
 ```json
@@ -203,7 +214,7 @@ def choose_target(
 ## Engine integration (`app/runtime/engine.py`)
 
 - When encountering a `router` node:
-  1. Build `targets` from normalized plan and render `prompt_template`, replacing `<targets>` with a comma‑separated list.
+  1. Build `targets` from normalized plan and render `prompt_template`, replacing `<targets>` with a comma-separated list.
   2. Call `providers.openai_like.route.run_router_llm(...)` with `response_format=json_schema`.
   3. Validate the returned dict: must contain `target` in `targets`; coerce `confidence` into `[0,1]` range if provided.
   4. Use `app/runtime/patterns/router.choose_target(...)` to finalize the route (considering `min_confidence`, `tie_break`, etc.).
@@ -211,21 +222,21 @@ def choose_target(
      - `AskUserClarify`: set run state to `paused` with `pause_reason="router.ask_user"`; include `metadata.hitl` object on the final event. Return control without proceeding to a child.
      - `DefaultChild`: pick `fallback.defaultChild` (validate that it is a valid target) and continue.
      - `SafeAgent`: route to `fallback.safeAgentRef` (label or id); continue.
-     - `Error`: raise `NoRouteError("ROUTER_NO_ROUTE")` (handled by PR‑08 middleware with a structured error envelope).
+     - `Error`: raise `NoRouteError("ROUTER_NO_ROUTE")` (handled by PR-08 middleware with a structured error envelope).
   6. Emit telemetry:
      - `telemetry.router.start` with `targets`, `min_confidence`, etc.
      - `telemetry.router.decision` with raw LLM `target/confidence` and final `chosen`.
      - `telemetry.router.fallback` when a fallback is used.
   7. Continue execution at the chosen child node.
 
-- **Streaming**: the router does not emit partial tokens to the main Responses stream. Only telemetry events are emitted during routing. After a route is decided, the chosen child’s normal streaming continues.
+- **Streaming**: the router does not emit partial tokens to the main Responses stream. Only telemetry events are emitted during routing. After a route is decided, the chosen child's normal streaming continues.
 
 - **Pause envelope** (AskUserClarify): terminate the stream with `response.completed` including metadata:
   ```json
   { "type":"response.completed",
     "response": { "id":"...", "metadata": { "hitl": { "status":"awaiting_user_input", "reason":"router.ask_user", "prompt":"Please clarify which area you need help with: Policy vs. M365." } } } }
   ```
-  The client can resume via `POST /v1/execute/{runId}/resume` (already implemented in PR‑08).
+  The client can resume via `POST /v1/execute/{runId}/resume` (already implemented in PR-08).
 
 ---
 
@@ -233,14 +244,14 @@ def choose_target(
 
 ### `tests/runtime/test_router_highest_conf.py`
 - Three targets; mock LLM to return `{target:"M365 Agent", confidence:0.9}`.
-- With `minConfidence=0.5`, route to “M365 Agent”.
-- With `minConfidence=0.95` and `allowBelowMinForTieBreak=false` → no eligible; `fallback.mode=DefaultChild` should pick default.
+- With `minConfidence=0.5`, route to "M365 Agent".
+- With `minConfidence=0.95` and `allowBelowMinForTieBreak=false` -> no eligible; `fallback.mode=DefaultChild` should pick default.
 
 ### `tests/runtime/test_router_deterministic_order.py`
-- LLM returns `{target:"X", confidence:0.2}` where “X” is not a valid target; `tieBreak="DeterministicOrder"` chooses the first child by edges order.
+- LLM returns `{target:"X", confidence:0.2}` where "X" is not a valid target; `tieBreak="DeterministicOrder"` chooses the first child by edges order.
 
 ### `tests/runtime/test_router_prefer_list.py`
-- LLM returns below min; `tieBreak="PreferList"` with `tieBreakPrefer=["Policy Agent","M365 Agent"]` selects “Policy Agent”.
+- LLM returns below min; `tieBreak="PreferList"` with `tieBreakPrefer=["Policy Agent","M365 Agent"]` selects "Policy Agent".
 
 ### `tests/runtime/test_router_fallbacks.py`
 - **AskUserClarify**: decision below min, no eligible, ensure engine sets `paused` and emits HITL metadata.
@@ -248,8 +259,8 @@ def choose_target(
 - **Error**: verify `NoRouteError` raised and caught by error middleware.
 
 ### `tests/runtime/test_router_autosync_enum.py`
-- `autoSyncEnum=true` with children labels `[A,B]` and `targets=["A","B","C"]` in schema → validation error (C not reachable).
-- Missing `targets` but children exist → targets derived from children, and schema enum patched accordingly.
+- `autoSyncEnum=true` with children labels `[A,B]` and `targets=["A","B","C"]` in schema -> validation error (C not reachable).
+- Missing `targets` but children exist -> targets derived from children, and schema enum patched accordingly.
 
 > All tests mock the LLM helper and avoid network.
 
@@ -265,13 +276,26 @@ Include:
 
 ---
 
+## Step-By-Step Implementation
+1. **Normalize router nodes**: extend `build_runtime_plan()` in `app/ir/loader.py` so `runtimeRouter` entries enforce auto-sync enum updates, validate targets, resolve fallback references, and preserve deterministic child ordering plus telemetry labels.
+2. **Runtime types & exports**: add `RouterDecision` (with pause metadata tweaks) in `app/runtime/types.py` and export router helpers from `app/runtime/patterns/__init__.py`.
+3. **Provider helper**: implement `app/providers/openai_like/route.py` to wrap `create_response` with JSON-schema enforcement, optional model overrides, telemetry emission, and retry/backoff hooks.
+4. **Router decision logic**: build `app/runtime/patterns/router.py` with `RouterConfig`, prompt rendering, tie-break resolution, fallback handling (`AskUserClarify`, `DefaultChild`, `SafeAgent`, `Error`), telemetry emission, and pause metadata persistence.
+5. **Compiler integration**: ensure `app/compiler/nodes/router.py` wires `build_router_runner(...)`, maps decision metadata back to child IDs, and registers conditionals that fall through to `END` when no target resolves.
+6. **Engine wiring**: update `app/runtime/engine.py` to invoke the router runner, stash router scratch state, merge router metadata into the final response, and set `status/pause_metadata` when AskUserClarify pauses a run.
+7. **Telemetry events**: add router-specific constants in `app/telemetry/events.py` and confirm the runner publishes `telemetry.router.start`, `.decision`, and `.fallback`.
+8. **Tests**: add async test modules for HighestConfidence, DeterministicOrder, PreferList, Fallbacks (AskUserClarify/SafeAgent/Error), and autoSyncEnum; monkeypatch the router LLM helper to avoid live calls.
+9. **Documentation**: create `docs/ROUTER_ORCHESTRATION.md` with configuration tables, routing examples, pause/resume flow, and guidance on unique child labels and targets.
+
+---
+
 ## Acceptance Criteria
 - [ ] Router compiles with normalized config; `autoSyncEnum` keeps schema/targets in sync.
 - [ ] Router calls LLM with `response_format=json_schema` and validates the shape.
-- [ ] Tie‑breakers behave as specified; deterministic order is stable across runs.
+- [ ] Tie-breakers behave as specified; deterministic order is stable across runs.
 - [ ] Fallbacks work: AskUserClarify pauses; DefaultChild/SafeAgent route; Error surfaces structured error.
 - [ ] Telemetry emits router start/decision/fallback events with labels and run ids.
-- [ ] Unit tests pass; coverage ≥ 80% on new/modified modules.
+- [ ] Unit tests pass; coverage >= 80% on new/modified modules.
 - [ ] Documentation explains behavior with runnable examples.
 
 ---
@@ -281,9 +305,9 @@ Include:
 uv run pytest -q --cov=app --cov-report=term-missing
 
 # Manual smoke:
-# 1) Use Sample Orchestration Package 1 where router → Policy vs M365.
-# 2) Set tieBreak=PreferList with ["Policy Agent"]; ask: "What's our vacation policy?" → routes to Policy.
-# 3) Set minConfidence=0.95; ask ambiguous question → verify AskUserClarify pause + resume path.
+# 1) Use Sample Orchestration Package 1 where router -> Policy vs M365.
+# 2) Set tieBreak=PreferList with ["Policy Agent"]; ask: "What's our vacation policy?" -> routes to Policy.
+# 3) Set minConfidence=0.95; ask ambiguous question -> verify AskUserClarify pause + resume path.
 ```
 
 ---
@@ -300,7 +324,7 @@ uv run pytest -q --cov=app --cov-report=term-missing
 - Type-annotate everything; validate inputs/outputs with Pydantic models.  
 - Keep dependencies minimal and justified; remove anything unused.  
 - Maintain API versioning (`/v1/*`) and accurate OpenAPI docs.  
-- Write comprehensive tests (unit + light integration); keep coverage ≥ 80%.  
+- Write comprehensive tests (unit + light integration); keep coverage >= 80%.  
 - Make tests deterministic (no network, time, or randomness without fixtures/mocks).  
 - Implement clear error taxonomy; never leak stack traces or secrets in responses.  
 - Use correlation/request IDs end-to-end; log enough to trace a request.  
@@ -308,7 +332,7 @@ uv run pytest -q --cov=app --cov-report=term-missing
 - Propagate required headers (tenant, correlation, auth) to downstream services.  
 - Follow JSON-Schema & topology rules for the IR; fail fast with actionable messages.  
 - Keep the orchestration compiler/extensibility simple (new nodes/tools are plug-in friendly).  
-- Match OpenAI **Responses** SSE event names verbatim; don’t invent new shapes.  
+- Match OpenAI **Responses** SSE event names verbatim; don't invent new shapes.  
 - Respect telemetry level header (`none|basic|verbose`) and apply PII redaction when enabled.  
 - Add timeouts, retries (with backoff), and circuit-breaker logic where appropriate.  
 - Favor clarity over micro-optimizations; document any intentional trade-offs.  

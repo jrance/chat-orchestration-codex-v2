@@ -193,6 +193,19 @@ def _agent_scratch(state: Mapping[str, Any], node_id: str) -> Dict[str, Any]:
     return {}
 
 
+def _router_state(state: Mapping[str, Any], node_id: str) -> Dict[str, Any]:
+    scratch = state.get("scratch")
+    if not isinstance(scratch, Mapping):
+        return {}
+    router_store = scratch.get("router")
+    if not isinstance(router_store, Mapping):
+        return {}
+    payload = router_store.get(node_id)
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {}
+
+
 async def execute_once(
     graph_id: str,
     run_id: str,
@@ -230,7 +243,22 @@ async def execute_once(
     output_state = copy.deepcopy(output_state)
     output_state.setdefault("run_id", run_id)
 
+    run_status = str(output_state.get("status") or "").strip()
+    if not run_status:
+        run_status = "completed"
+        output_state["status"] = run_status
+    pause_metadata = output_state.get("pause_metadata") if run_status == "paused" else None
+    pause_reason = output_state.get("pause_reason") if run_status == "paused" else None
+    if pause_metadata is not None and not isinstance(pause_metadata, Mapping):
+        pause_metadata = None
+
     record_metadata = _resolve_metadata(previous, metadata, state_in)
+    record_metadata["status"] = run_status
+    if pause_reason:
+        record_metadata["pause_reason"] = pause_reason
+    if isinstance(pause_metadata, Mapping) and pause_metadata:
+        record_metadata["pause_metadata"] = copy.deepcopy(pause_metadata)
+
     store.put_state(RunStateRecord(run_id=run_id, state=output_state, metadata=record_metadata))
     return output_state
 
@@ -428,14 +456,35 @@ async def run_once(
 
     entry_id = str(plan.get("entryId") or "")
     scratch = _agent_scratch(final_state, entry_id)
+    router_info = _router_state(final_state, entry_id)
+    run_status = str(final_state.get("status") or "completed")
+    pause_metadata = final_state.get("pause_metadata") if run_status == "paused" else {}
+    if not isinstance(pause_metadata, Mapping):
+        pause_metadata = {}
 
     output_text = str(scratch.get("last_output_text") or _last_assistant_text(final_state))
     usage_payload = scratch.get("usage")
-    response_payload = scratch.get("last_response") or {}
-    if not isinstance(usage_payload, Mapping):
-        usage_payload = {}
+    response_payload_raw = scratch.get("last_response")
+    if isinstance(response_payload_raw, Mapping):
+        response_payload: Dict[str, Any] = copy.deepcopy(response_payload_raw)
+    else:
+        response_payload = {}
 
-    usage = dict(usage_payload) or _usage(_flatten_input(user_input), output_text)
+    usage = dict(usage_payload) if isinstance(usage_payload, Mapping) else {}
+    if run_status != "paused" and not usage:
+        usage = _usage(_flatten_input(user_input), output_text)
+
+    if "metadata" not in response_payload or not isinstance(response_payload.get("metadata"), Mapping):
+        response_payload["metadata"] = {}
+    metadata_block = dict(response_payload["metadata"])
+    response_payload["metadata"] = metadata_block
+
+    router_decision = router_info.get("decision") if isinstance(router_info, Mapping) else None
+    if isinstance(router_decision, Mapping) and router_decision:
+        metadata_block["router"] = copy.deepcopy(router_decision)
+    if pause_metadata:
+        metadata_block["hitl"] = copy.deepcopy(pause_metadata.get("hitl", pause_metadata))
+    response_payload["status"] = run_status
 
     if telemetry and telemetry.enabled():
         await telemetry.publish(
@@ -450,5 +499,5 @@ async def run_once(
         thread_id=context.thread_id or "",
         output_text=output_text,
         usage=dict(usage),
-        response=dict(response_payload) if isinstance(response_payload, Mapping) else {},
+        response=response_payload,
     )

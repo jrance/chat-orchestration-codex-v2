@@ -15,6 +15,9 @@ CONCURRENT_CHILD_CANCELLED = "telemetry.concurrent.child.cancelled"
 CONCURRENT_CHILD_ERROR = "telemetry.concurrent.child.error"
 CONCURRENT_CHILD_DELTA = "telemetry.concurrent.child.delta"
 CONCURRENT_MERGE_DECISION = "telemetry.concurrent.merge.decision"
+ROUTER_RUN_STARTED = "telemetry.router.start"
+ROUTER_DECISION = "telemetry.router.decision"
+ROUTER_FALLBACK = "telemetry.router.fallback"
 
 
 def make_event(event: str, payload: Mapping[str, Any]) -> TelemetryEvent:
@@ -33,5 +36,8 @@ __all__ = [
     "CONCURRENT_MERGE_DECISION",
     "CONCURRENT_RUN_COMPLETED",
     "CONCURRENT_RUN_STARTED",
+    "ROUTER_DECISION",
+    "ROUTER_FALLBACK",
+    "ROUTER_RUN_STARTED",
     "make_event",
 ]

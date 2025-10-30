@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, List, TYPE_CHECKING
+from typing import Any, Mapping, Sequence, TYPE_CHECKING
 
 from langgraph.graph import END
+
+from app.runtime.patterns.router import build_router_runner
 
 from ..types import OrchestratorState
 from . import register
@@ -14,32 +16,46 @@ if TYPE_CHECKING:
 
 
 def compile_router(builder: "GraphBuilder", node: dict[str, Any], plan: dict[str, Any]) -> None:
-    """Compile a router node into the graph."""
+    """Compile a router node into the graph using normalized runtime metadata."""
 
     node_id = node["id"]
-    data = node.get("data") or {}
-    targets: List[str] = [t for t in data.get("targets") or [] if isinstance(t, str)]
-    min_confidence = float(data.get("minConfidence") or 0.0)
+    runtime_router = (plan.get("runtimeRouter") or {}).get(node_id)
+    if not runtime_router:
+        raise ValueError(f"Router node '{node_id}' missing runtime metadata")
 
-    def router_fn(state: OrchestratorState) -> OrchestratorState:
-        choice = targets[0] if targets else None
-        route = {
-            "target": choice,
-            "confidence": 1.0 if choice else 0.0,
-            "minConfidence": min_confidence,
-        }
-        return {**state, "route": route}
+    cfg = runtime_router.get("cfg") or {}
+    targets: Sequence[str] = runtime_router.get("targets") or ()
+    child_ids: Sequence[str] = runtime_router.get("children") or ()
+    target_to_child: Mapping[str, str] = runtime_router.get("target_to_child") or {}
+    child_labels: Mapping[str, str] = runtime_router.get("child_labels") or {}
 
-    builder.add_node(node_id, router_fn)
+    runner = build_router_runner(
+        node,
+        config=cfg,
+        child_ids=child_ids,
+        targets=targets,
+        target_to_child=target_to_child,
+        child_labels=child_labels,
+    )
+    builder.add_node(node_id, runner)
+
+    normalized_children = tuple(child_ids)
 
     def selector(state: OrchestratorState) -> str | None:
-        route = state.get("route") or {}
-        target = route.get("target")
-        if isinstance(target, str) and target:
-            return target
+        scratch = state.get("scratch") or {}
+        router_store = scratch.get("router") or {}
+        node_state = router_store.get(node_id) or {}
+        decision = node_state.get("decision") or {}
+        target_node_id = (
+            decision.get("targetNodeId")
+            or decision.get("target_node_id")
+            or decision.get("targetnodeid")
+        )
+        if isinstance(target_node_id, str) and target_node_id in normalized_children:
+            return target_node_id
         return END
 
-    builder.register_conditional(node_id, selector, targets, default_to_end=True)
+    builder.register_conditional(node_id, selector, normalized_children, default_to_end=True)
 
 
 register("router", compile_router)
