@@ -69,7 +69,7 @@ def _reset_runtime_state():
 
 @pytest.fixture(autouse=True)
 def _stub_llm(monkeypatch: pytest.MonkeyPatch):
-    async def _invoke_stub(state, agent_node, prompt):
+    async def _invoke_stub(state, agent_node, prompt, **_kwargs):
         new_state = copy.deepcopy(state)
         messages = list(new_state.get("messages") or [])
         messages.append({"role": "assistant", "content": f"stub-{agent_node.get('id')}"})

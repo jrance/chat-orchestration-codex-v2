@@ -17,7 +17,7 @@ async def async_client() -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 def stub_llm(monkeypatch: pytest.MonkeyPatch):
-    async def _invoke(state, agent_node, prompt):
+    async def _invoke(state, agent_node, prompt, **_kwargs):
         new_state = copy.deepcopy(state)
         messages = list(new_state.get("messages") or [])
         messages.append({"role": "assistant", "content": "stub-response"})
@@ -29,7 +29,7 @@ def stub_llm(monkeypatch: pytest.MonkeyPatch):
             usage={"output_tokens": 1},
         )
 
-    async def _stream(state, agent_node, prompt):
+    async def _stream(state, agent_node, prompt, **_kwargs):
         yield {"type": "response.created", "status": "in_progress"}
         yield {"type": "response.output_text.delta", "delta": "stub "}
         yield {

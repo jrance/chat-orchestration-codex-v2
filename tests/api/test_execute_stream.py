@@ -37,7 +37,7 @@ def _assert_event(sequence: list[str], event_name: str) -> bool:
 
 @pytest.fixture(autouse=True)
 def _stub_llm(monkeypatch: pytest.MonkeyPatch):
-    async def _invoke_stub(state, agent_node, prompt):
+    async def _invoke_stub(state, agent_node, prompt, **_kwargs):
         new_state = copy.deepcopy(state)
         messages = list(new_state.get("messages") or [])
         messages.append({"role": "assistant", "content": "stub response"})
@@ -49,7 +49,7 @@ def _stub_llm(monkeypatch: pytest.MonkeyPatch):
             usage={"output_tokens": 3},
         )
 
-    async def _stream_stub(state, agent_node, prompt):
+    async def _stream_stub(state, agent_node, prompt, **_kwargs):
         yield {"type": "response.created", "status": "in_progress"}
         yield {"type": "response.output_text.delta", "delta": "stub "}
         yield {

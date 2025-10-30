@@ -44,7 +44,7 @@ def _sample_ir() -> dict:
 
 @pytest.fixture(autouse=True)
 def _stub_llm(monkeypatch: pytest.MonkeyPatch):
-    async def _invoke_stub(state, agent_node, prompt):
+    async def _invoke_stub(state, agent_node, prompt, **_kwargs):
         new_state = copy.deepcopy(state)
         messages = list(new_state.get("messages") or [])
         messages.append({"role": "assistant", "content": f"stub:{prompt[:5]}"})
@@ -56,7 +56,7 @@ def _stub_llm(monkeypatch: pytest.MonkeyPatch):
             usage={"output_tokens": 2},
         )
 
-    async def _stream_stub(state, agent_node, prompt):
+    async def _stream_stub(state, agent_node, prompt, **_kwargs):
         yield {"type": "response.created", "status": "in_progress"}
         yield {"type": "response.output_text.delta", "delta": "stub "}
         yield {

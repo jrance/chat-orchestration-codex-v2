@@ -18,7 +18,9 @@ def compile_agent_codeless(builder: "GraphBuilder", node: dict[str, Any], plan: 
     node_id = node["id"]
     agent_prompts = plan.get("agentPrompts") or {}
     prompt = agent_prompts.get(node_id, "")
-    builder.add_node(node_id, build_codeless_runner(node, prompt))
+    attached = (plan.get("agentToolSpecs") or {}).get(node_id, [])
+    mcp_servers = plan.get("mcpServers") or {}
+    builder.add_node(node_id, build_codeless_runner(node, prompt, attached_tools=attached, mcp_servers=mcp_servers))
 
 
 register("agent.codeless", compile_agent_codeless)

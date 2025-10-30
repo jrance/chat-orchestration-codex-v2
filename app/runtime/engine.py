@@ -276,6 +276,8 @@ async def run_stream(
     entry_id = str(plan.get("entryId") or "")
     node = (plan.get("nodeById") or {}).get(entry_id) or {}
     prompt = (plan.get("agentPrompts") or {}).get(entry_id, "")
+    attached_tools = (plan.get("agentToolSpecs") or {}).get(entry_id, [])
+    mcp_servers = plan.get("mcpServers") or {}
 
     initial_state: OrchestratorState = {"messages": []}
     user_message = _user_message_from_input(user_input)
@@ -292,7 +294,13 @@ async def run_stream(
 
     token = set_runtime_context(RuntimeContext(execution=context, telemetry=telemetry))
     try:
-        async for payload in stream_codeless(initial_state, node, prompt):
+        async for payload in stream_codeless(
+            initial_state,
+            node,
+            prompt,
+            attached_tools=attached_tools,
+            mcp_servers=mcp_servers,
+        ):
             data = dict(payload)
             data.setdefault("run_id", context.run_id)
             data.setdefault("thread_id", context.thread_id)
