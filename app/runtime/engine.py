@@ -16,6 +16,7 @@ from app.runtime.agents.codeless import stream_codeless
 from app.runtime.context import RuntimeContext, reset_runtime_context, set_runtime_context
 from app.runtime.patterns.concurrent import build_concurrent_runner
 from app.runtime.patterns.groupchat import build_groupchat_runner
+from app.runtime.state import Checkpoint, RunStatus, get_checkpointer
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streamer import TelemetryStreamer
@@ -136,6 +137,7 @@ def _merge_state(
 
 def _resolve_metadata(
     previous: RunStateRecord | None,
+    checkpoint: Checkpoint | None,
     new_metadata: Mapping[str, Any] | None,
     state_in: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
@@ -147,6 +149,10 @@ def _resolve_metadata(
         metadata.update(copy.deepcopy(previous.metadata))
         created_at = previous.metadata.get("created_at")
         invocations = int(previous.metadata.get("invocations", 0))
+    elif checkpoint is not None:
+        metadata.update(copy.deepcopy(checkpoint.metadata))
+        created_at = metadata.get("created_at") or checkpoint.created_at.timestamp()
+        invocations = int(metadata.get("invocations", 0))
 
     if new_metadata:
         metadata.update(copy.deepcopy(dict(new_metadata)))
@@ -225,9 +231,16 @@ async def execute_once(
     if app is None:
         raise ValueError(f"Unknown graph_id '{graph_id}'")
 
+    checkpointer = get_checkpointer()
     store = get_run_state_store()
     previous = store.get_state(run_id)
-    previous_state = previous.state if previous else None
+    checkpoint = checkpointer.load_checkpoint(run_id)
+
+    previous_state: OrchestratorState | None = None
+    if previous and previous.state:
+        previous_state = previous.state
+    elif checkpoint:
+        previous_state = checkpoint.state
 
     merged_state = _merge_state(previous_state, state_in)
     merged_state["run_id"] = run_id
@@ -244,23 +257,37 @@ async def execute_once(
     output_state = copy.deepcopy(output_state)
     output_state.setdefault("run_id", run_id)
 
-    run_status = str(output_state.get("status") or "").strip()
-    if not run_status:
-        run_status = "completed"
-        output_state["status"] = run_status
-    pause_metadata = output_state.get("pause_metadata") if run_status == "paused" else None
-    pause_reason = output_state.get("pause_reason") if run_status == "paused" else None
+    raw_status = str(output_state.get("status") or "").strip() or "completed"
+    run_status_enum = RunStatus.from_raw(raw_status, RunStatus.COMPLETED)
+    output_state["status"] = run_status_enum.value
+    pause_metadata = output_state.get("pause_metadata") if run_status_enum is RunStatus.PAUSED else None
+    pause_reason = output_state.get("pause_reason") if run_status_enum is RunStatus.PAUSED else None
     if pause_metadata is not None and not isinstance(pause_metadata, Mapping):
         pause_metadata = None
 
-    record_metadata = _resolve_metadata(previous, metadata, state_in)
-    record_metadata["status"] = run_status
+    record_metadata = _resolve_metadata(previous, checkpoint, metadata, state_in)
+    record_metadata["status"] = run_status_enum.value
+    record_metadata["run_id"] = run_id
+    thread_id = context.thread_id if context and context.thread_id else record_metadata.get("thread_id")
+    if not thread_id:
+        thread_id = run_id
+    record_metadata["thread_id"] = thread_id
     if pause_reason:
         record_metadata["pause_reason"] = pause_reason
     if isinstance(pause_metadata, Mapping) and pause_metadata:
         record_metadata["pause_metadata"] = copy.deepcopy(pause_metadata)
+    else:
+        record_metadata.pop("pause_metadata", None)
+        record_metadata.pop("pause_reason", None)
 
     store.put_state(RunStateRecord(run_id=run_id, state=output_state, metadata=record_metadata))
+    checkpointer.save_checkpoint(
+        run_id,
+        output_state,
+        status=run_status_enum,
+        thread_id=str(thread_id),
+        metadata=record_metadata,
+    )
     return output_state
 
 
@@ -276,7 +303,8 @@ async def resume_run(
     """Resume a previously-started run by replaying the compiled graph."""
 
     store = get_run_state_store()
-    if store.get_state(run_id) is None:
+    record = store.get_state(run_id)
+    if record is None and get_checkpointer().load_checkpoint(run_id) is None:
         raise ValueError(f"Run '{run_id}' not found")
     return await execute_once(
         graph_id,

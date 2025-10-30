@@ -50,9 +50,12 @@ class Settings(BaseSettings):
     org_preamble_path: str | None = "docs/org_preamble.md"
     org_preamble_text: str | None = None
 
-    # Runtime persistence configuration (PR-07)
-    checkpointer_kind: str = "memory"
+    # Runtime persistence configuration (PR-07/PR-14)
+    checkpointer_kind: str = "memory"  # legacy name kept for compatibility
+    checkpointer_backend: str = "memory"
     run_store_kind: str = "memory"
+    state_ttl_sec: int | None = 86_400
+    state_max_bytes: int | None = 5_242_880
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
@@ -81,6 +84,30 @@ class Settings(BaseSettings):
         if not isinstance(loaded, dict):
             return {}
         return {str(k): str(v) for k, v in loaded.items()}
+
+    # -- runtime helpers -----------------------------------------------------
+
+    def state_ttl(self) -> int | None:
+        """Return configured state TTL seconds or None when disabled."""
+
+        if self.state_ttl_sec is None:
+            return None
+        try:
+            value = int(self.state_ttl_sec)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def state_max_bytes(self) -> int | None:
+        """Return configured approximate max bytes for in-memory persistence."""
+
+        if self.state_max_bytes is None:
+            return None
+        try:
+            value = int(self.state_max_bytes)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
 
 settings = Settings()
