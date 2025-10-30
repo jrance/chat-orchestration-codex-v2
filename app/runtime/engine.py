@@ -15,6 +15,7 @@ from app.ir.loader import build_runtime_plan
 from app.runtime.agents.codeless import stream_codeless
 from app.runtime.context import RuntimeContext, reset_runtime_context, set_runtime_context
 from app.runtime.patterns.concurrent import build_concurrent_runner
+from app.runtime.patterns.groupchat import build_groupchat_runner
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streamer import TelemetryStreamer
@@ -308,6 +309,7 @@ async def run_stream(
     attached_tools = (plan.get("agentToolSpecs") or {}).get(entry_id, [])
     mcp_servers = plan.get("mcpServers") or {}
     runtime_concurrent = plan.get("runtimeConcurrent") or {}
+    runtime_groupchat = plan.get("runtimeGroupchat") or {}
 
     initial_state: OrchestratorState = {"messages": []}
     user_message = _user_message_from_input(user_input)
@@ -388,6 +390,71 @@ async def run_stream(
                             "chosenNodeId": chosen_node_id,
                         }
                     },
+                },
+            }
+            yield RunStreamEvent(event="response.completed", data=completed_payload)
+        elif node.get("kind") == "groupchat":
+            groupchat_meta = runtime_groupchat.get(entry_id)
+            if not groupchat_meta:
+                raise ValueError(f"Groupchat node '{entry_id}' missing runtime metadata")
+            runner = build_groupchat_runner(
+                node,
+                groupchat_meta,
+                node_by_id=plan.get("nodeById") or {},
+                agent_prompts=plan.get("agentPrompts") or {},
+                agent_tool_specs=plan.get("agentToolSpecs") or {},
+                mcp_servers=mcp_servers,
+            )
+            state_after = await runner(initial_state)
+            scratch = state_after.get("scratch") or {}
+            agents_store = scratch.get("agents") or {}
+            agent_entry = agents_store.get(entry_id) or {}
+            final_text = str(agent_entry.get("last_output_text") or "")
+            usage_payload = agent_entry.get("usage")
+            usage = dict(usage_payload) if isinstance(usage_payload, Mapping) else _usage(_flatten_input(user_input), final_text)
+            groupchat_payload = agent_entry.get("groupchat")
+            if not isinstance(groupchat_payload, Mapping):
+                groupchat_payload = (scratch.get("groupchat") or {}).get(entry_id) or {}
+            participants_labels: list[str] = []
+            if isinstance(groupchat_payload, Mapping):
+                participants_labels = list(groupchat_payload.get("participants") or [])
+            created = {
+                "type": "response.created",
+                "run_id": context.run_id,
+                "thread_id": context.thread_id,
+                "status": "in_progress",
+            }
+            yield RunStreamEvent(event="response.created", data=created)
+            if final_text:
+                yield RunStreamEvent(
+                    event="response.output_text.delta",
+                    data={
+                        "type": "response.output_text.delta",
+                        "delta": final_text,
+                        "run_id": context.run_id,
+                        "thread_id": context.thread_id,
+                    },
+                )
+            metadata_groupchat: dict[str, Any] = {}
+            if isinstance(groupchat_payload, Mapping):
+                metadata_groupchat = {
+                    "turns": groupchat_payload.get("turnCount"),
+                    "stopWhen": groupchat_payload.get("stopWhen"),
+                    "finalSpeaker": groupchat_payload.get("finalSpeaker"),
+                    "participants": participants_labels,
+                }
+                stop_reason = groupchat_payload.get("stopReason")
+                if stop_reason:
+                    metadata_groupchat["stopReason"] = stop_reason
+            completed_payload = {
+                "type": "response.completed",
+                "run_id": context.run_id,
+                "thread_id": context.thread_id,
+                "output_text": final_text,
+                "usage": usage,
+                "response": {
+                    "id": context.run_id or entry_id,
+                    "metadata": {"groupchat": metadata_groupchat},
                 },
             }
             yield RunStreamEvent(event="response.completed", data=completed_payload)
@@ -482,6 +549,19 @@ async def run_once(
     router_decision = router_info.get("decision") if isinstance(router_info, Mapping) else None
     if isinstance(router_decision, Mapping) and router_decision:
         metadata_block["router"] = copy.deepcopy(router_decision)
+    groupchat_meta = scratch.get("groupchat")
+    if isinstance(groupchat_meta, Mapping):
+        participants_labels = list(groupchat_meta.get("participants") or [])
+        groupchat_metadata = {
+            "turns": groupchat_meta.get("turnCount"),
+            "stopWhen": groupchat_meta.get("stopWhen"),
+            "finalSpeaker": groupchat_meta.get("finalSpeaker"),
+            "participants": participants_labels,
+        }
+        stop_reason = groupchat_meta.get("stopReason")
+        if stop_reason:
+            groupchat_metadata["stopReason"] = stop_reason
+        metadata_block["groupchat"] = groupchat_metadata
     if pause_metadata:
         metadata_block["hitl"] = copy.deepcopy(pause_metadata.get("hitl", pause_metadata))
     response_payload["status"] = run_status

@@ -18,6 +18,9 @@ CONCURRENT_MERGE_DECISION = "telemetry.concurrent.merge.decision"
 ROUTER_RUN_STARTED = "telemetry.router.start"
 ROUTER_DECISION = "telemetry.router.decision"
 ROUTER_FALLBACK = "telemetry.router.fallback"
+GROUPCHAT_TURN_DELTA = "telemetry.groupchat.turn.delta"
+GROUPCHAT_TURN_COMPLETED = "telemetry.groupchat.turn.completed"
+GROUPCHAT_RUN_COMPLETED = "telemetry.groupchat.completed"
 
 
 def make_event(event: str, payload: Mapping[str, Any]) -> TelemetryEvent:
@@ -36,6 +39,9 @@ __all__ = [
     "CONCURRENT_MERGE_DECISION",
     "CONCURRENT_RUN_COMPLETED",
     "CONCURRENT_RUN_STARTED",
+    "GROUPCHAT_RUN_COMPLETED",
+    "GROUPCHAT_TURN_COMPLETED",
+    "GROUPCHAT_TURN_DELTA",
     "ROUTER_DECISION",
     "ROUTER_FALLBACK",
     "ROUTER_RUN_STARTED",

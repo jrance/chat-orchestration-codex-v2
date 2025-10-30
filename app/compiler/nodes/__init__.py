@@ -45,7 +45,7 @@ def ensure_builtin_compilers() -> None:
     if _bootstrapped:
         return
 
-    for module_name in ("agent_codeless", "router", "sequential", "concurrent"):
+    for module_name in ("agent_codeless", "router", "sequential", "concurrent", "groupchat"):
         import_module(f"{__name__}.{module_name}")
 
     _bootstrapped = True

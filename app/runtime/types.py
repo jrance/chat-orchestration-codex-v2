@@ -57,5 +57,44 @@ class RouterDecision(TypedDict, total=False):
     hitl: PauseMetadata | None
     raw: dict[str, Any]
 
+class TurnRecord(TypedDict, total=False):
+    """Captures a single utterance inside a groupchat roundtable."""
 
-__all__ = ["ChildResult", "ConcurrentResult", "PauseMetadata", "RouterDecision"]
+    speakerId: str
+    speakerLabel: str
+    role: Literal["assistant", "moderator"]
+    text: str
+    usage: dict[str, Any] | None
+    ts: float
+    status: Literal["completed", "error"]
+    instruction: str | None
+    error: str | None
+
+
+class GroupChatResult(TypedDict, total=False):
+    """Aggregated outcome for a groupchat orchestration node."""
+
+    nodeId: str
+    label: str
+    stopWhen: Literal["ModeratorSatisfied", "AllAgree"]
+    stopReason: str
+    turns: list[TurnRecord]
+    finalSpeaker: str
+    finalSpeakerId: str
+    finalText: str
+    participants: list[str]
+    emitSynthesis: bool
+    usage: dict[str, Any] | None
+    satisfaction: dict[str, Any] | None
+    consensus: dict[str, Any] | None
+    turnCount: int
+
+
+__all__ = [
+    "ChildResult",
+    "ConcurrentResult",
+    "GroupChatResult",
+    "PauseMetadata",
+    "RouterDecision",
+    "TurnRecord",
+]

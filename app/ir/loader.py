@@ -145,6 +145,83 @@ def _normalize_concurrent_nodes(
     return runtime
 
 
+def _normalize_groupchat_nodes(
+    node_by_id: Dict[str, dict],
+    edges: List[dict],
+) -> Dict[str, dict[str, Any]]:
+    by_source = _edges_by_source(edges)
+    runtime: Dict[str, dict[str, Any]] = {}
+
+    for node_id, node in node_by_id.items():
+        if node.get("kind") != "groupchat":
+            continue
+        data = node.get("data") or {}
+
+        moderator_prompt = str(data.get("moderatorPrompt") or "").strip()
+        if not moderator_prompt:
+            raise ValueError(f"GroupChat node '{node_id}' is missing a moderatorPrompt")
+
+        max_turns_raw = data.get("maxTurns")
+        try:
+            max_turns = int(max_turns_raw) if max_turns_raw is not None else 6
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError(f"GroupChat node '{node_id}' has invalid maxTurns '{max_turns_raw}'") from exc
+        if max_turns < 1:
+            raise ValueError(f"GroupChat node '{node_id}' maxTurns must be >= 1")
+
+        stop_when = str(data.get("stopWhen") or "ModeratorSatisfied")
+        if stop_when not in {"ModeratorSatisfied", "AllAgree"}:
+            raise ValueError(f"GroupChat node '{node_id}' has unsupported stopWhen '{stop_when}'")
+
+        emit_synthesis = data.get("emitSynthesis")
+        if emit_synthesis is None:
+            emit_synthesis = True
+        else:
+            emit_synthesis = bool(emit_synthesis)
+
+        speaker_budget_raw = data.get("speakerBudgetTokens")
+        try:
+            speaker_budget_tokens = int(speaker_budget_raw) if speaker_budget_raw is not None else 400
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"GroupChat node '{node_id}' has invalid speakerBudgetTokens '{speaker_budget_raw}'"
+            ) from exc
+        if speaker_budget_tokens <= 0:
+            speaker_budget_tokens = 400
+
+        participants = [
+            child_id
+            for child_id in by_source.get(node_id, [])
+            if isinstance(child_id, str) and child_id in node_by_id
+        ]
+        if len(participants) < 2:
+            raise ValueError(f"GroupChat node '{node_id}' requires at least two participant children")
+
+        seen_labels: set[str] = set()
+        for child_id in participants:
+            child = node_by_id.get(child_id) or {}
+            label = str(child.get("label") or child_id)
+            if label in seen_labels:
+                raise ValueError(f"GroupChat node '{node_id}' has duplicate participant label '{label}'")
+            seen_labels.add(label)
+
+        runtime[node_id] = {
+            "id": node_id,
+            "kind": "groupchat",
+            "label": node.get("label") or "",
+            "cfg": {
+                "moderator_prompt": moderator_prompt,
+                "max_turns": max_turns,
+                "stop_when": stop_when,
+                "emit_synthesis": emit_synthesis,
+                "speaker_budget_tokens": speaker_budget_tokens,
+            },
+            "participants": participants,
+        }
+
+    return runtime
+
+
 def _normalize_router_nodes(
     node_by_id: Dict[str, dict],
     edges: List[dict],
@@ -344,6 +421,19 @@ def _prune_concurrent_edges(node_by_id: Dict[str, dict], edges: List[dict]) -> L
     return pruned
 
 
+def _prune_groupchat_edges(node_by_id: Dict[str, dict], edges: List[dict]) -> List[dict]:
+    """Remove edges originating from groupchat nodes (participants run inside the controller)."""
+
+    pruned: List[dict] = []
+    for edge in edges:
+        src = edge.get("from")
+        src_node = node_by_id.get(src)
+        if isinstance(src_node, Mapping) and src_node.get("kind") == "groupchat":
+            continue
+        pruned.append(edge)
+    return pruned
+
+
 def build_runtime_plan(
     ir: Dict[str, Any],
     runtime_vars: Mapping[str, Any] | None = None,
@@ -370,9 +460,11 @@ def build_runtime_plan(
         agent_tool_specs[agent_id] = [tool_specs[tool_id] for tool_id in tool_ids if tool_id in tool_specs]
 
     runtime_concurrent = _normalize_concurrent_nodes(node_by_id, normalized["edges"])
+    runtime_groupchat = _normalize_groupchat_nodes(node_by_id, normalized["edges"])
     runtime_router = _normalize_router_nodes(node_by_id, normalized["edges"])
     pruned_edges = _prune_router_edges(node_by_id, normalized["edges"])
     pruned_edges = _prune_concurrent_edges(node_by_id, pruned_edges)
+    pruned_edges = _prune_groupchat_edges(node_by_id, pruned_edges)
 
     plan = {
         "entryId": normalized["entryId"],
@@ -385,6 +477,7 @@ def build_runtime_plan(
         "agentToolSpecs": agent_tool_specs,
         "mcpServers": _resolve_mcp_servers(node_by_id),
         "runtimeConcurrent": runtime_concurrent,
+        "runtimeGroupchat": runtime_groupchat,
         "runtimeRouter": runtime_router,
     }
 
