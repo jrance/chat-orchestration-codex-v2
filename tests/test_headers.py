@@ -1,5 +1,7 @@
 import pytest
 
+from app.api.deps import ExecutionContext
+from app.api.models import ExecutionHeaders
 from app.config.settings import reload_settings
 from app.http.headers import (
     H_CLIENT_ID,
@@ -53,3 +55,19 @@ def test_extra_headers_do_not_override_explicit_inputs(monkeypatch: pytest.Monke
 
     assert headers[H_CORRELATION_ID] == "corr-y"
     assert headers[H_TELEMETRY] == "verbose"
+
+
+def test_execution_context_to_http_headers_includes_optional_fields() -> None:
+    headers_model = ExecutionHeaders(
+        tenant_id="tenant-1",
+        client_id="client-123",
+        telemetry="basic",
+        extra_headers={"X-Extra-Feature": "enabled"},
+    )
+    context = ExecutionContext(headers=headers_model)
+    http_headers = context.to_http_headers()
+
+    assert http_headers["X-Tenant-Id"] == "tenant-1"
+    assert http_headers["X-Client-Id"] == "client-123"
+    assert http_headers["X-Telemetry"] == "basic"
+    assert http_headers["X-Extra-Feature"] == "enabled"

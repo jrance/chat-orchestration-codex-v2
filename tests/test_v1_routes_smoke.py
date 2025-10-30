@@ -115,10 +115,10 @@ async def test_resume_missing_run(async_client: AsyncClient):
     assert payload["detail"]["error"]["code"] == "RUN_NOT_FOUND"
 
 @pytest.mark.anyio
-async def test_resume_missing_run(async_client: AsyncClient):
+async def test_resume_missing_kind_returns_422(async_client: AsyncClient):
     response = await async_client.post(
         "/v1/execute/run-123/resume",
         json={"input": "hi"},
         headers={"X-Tenant-Id": "tenant-1"},
     )
-    assert response.status_code == 404
+    assert response.status_code == 422

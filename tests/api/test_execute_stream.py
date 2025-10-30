@@ -46,7 +46,7 @@ def _stub_llm(monkeypatch: pytest.MonkeyPatch):
             state=new_state,
             response={"output_text": "stub response"},
             output_text="stub response",
-            usage={"output_tokens": 3},
+            usage={"output_tokens": 2},
         )
 
     async def _stream_stub(state, agent_node, prompt, **_kwargs):
@@ -55,7 +55,7 @@ def _stub_llm(monkeypatch: pytest.MonkeyPatch):
         yield {
             "type": "response.completed",
             "output_text": "stub response",
-            "usage": {"output_tokens": 3},
+            "usage": {"output_tokens": 2},
         }
 
     monkeypatch.setattr(codeless_mod, "invoke_llm", _invoke_stub)
@@ -84,7 +84,7 @@ async def test_execute_returns_result(async_client: AsyncClient):
     assert data["runId"]
     assert data["status"] in {"running", "completed"}
     assert data["sse"]["url"].endswith(data["runId"])
-    assert data.get("usage", {}).get("output_tokens") == 3
+    assert data.get("usage", {}).get("output_tokens") == 2
 
 
 @pytest.mark.anyio

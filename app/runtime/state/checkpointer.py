@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any, Dict, Mapping, Optional
 
 try:  # pragma: no cover - guard for build environments without langgraph
@@ -119,56 +120,86 @@ class CheckpointManager(Checkpointer):
         return RunState.from_checkpoint(checkpoint)
 
 
-_CHECKPOINTER: Optional[CheckpointManager] = None
+class InMemoryCheckpointer(CheckpointManager):
+    """Checkpoint manager backed by the in-memory saver."""
 
-
-def _build_backend(kind: str) -> MemoryCheckpointBackend | RedisCheckpointBackend:
-    if kind == "memory":
-        return MemoryCheckpointBackend(
+    def __init__(self) -> None:
+        backend = MemoryCheckpointBackend(
             ttl_seconds=settings.state_ttl(),
             max_bytes=settings.state_max_bytes_limit(),
         )
-    if kind == "redis":
-        return RedisCheckpointBackend(
+        super().__init__(backend)
+
+
+class RedisCheckpointer(CheckpointManager):
+    """Checkpoint manager backed by Redis (optionally fakeredis for tests)."""
+
+    def __init__(self) -> None:
+        backend = RedisCheckpointBackend(
             url=settings.redis_url,
             ttl_seconds=settings.state_ttl(),
             namespace="orch",
-            emulate=settings.redis_emulator,
+            emulate=settings.redis_emulator if settings.redis_emulator else None,
         )
-    raise ValueError(f"Unknown CHECKPOINTER_BACKEND '{kind}'")
+        super().__init__(backend)
+
+
+_CHECKPOINTER: Optional[CheckpointManager] = None
+_CHECKPOINTER_KIND: Optional[str] = None
+
+
+def _resolve_kind() -> str:
+    env_kind = os.getenv("CHECKPOINTER_KIND")
+    if env_kind and env_kind.strip():
+        return env_kind.strip().lower()
+
+    settings_kind = getattr(settings, "checkpointer_kind", None)
+    if settings_kind and str(settings_kind).strip():
+        return str(settings_kind).strip().lower()
+
+    backend_kind = getattr(settings, "checkpointer_backend", None)
+    if backend_kind and str(backend_kind).strip():
+        return str(backend_kind).strip().lower()
+
+    return "memory"
 
 
 def get_checkpointer() -> CheckpointManager:
-    """Return singleton checkpoint manager based on settings."""
+    """Return singleton checkpoint manager honouring legacy env precedence."""
 
-    global _CHECKPOINTER
+    global _CHECKPOINTER, _CHECKPOINTER_KIND
 
-    kind = (settings.checkpointer_backend or settings.checkpointer_kind or "memory").strip().lower()
-    if not kind:
-        kind = "memory"
+    kind = _resolve_kind()
 
-    if _CHECKPOINTER is None or getattr(_CHECKPOINTER, "_kind", None) != kind:
-        backend = _build_backend(kind)
-        manager = CheckpointManager(backend)
-        manager._kind = kind  # type: ignore[attr-defined]
-        _CHECKPOINTER = manager
+    if kind not in {"memory", "redis"}:
+        raise ValueError(f"Unknown checkpointer kind: {kind}")
+
+    if _CHECKPOINTER is None or _CHECKPOINTER_KIND != kind:
+        if kind == "memory":
+            _CHECKPOINTER = InMemoryCheckpointer()
+        else:
+            _CHECKPOINTER = RedisCheckpointer()
+        _CHECKPOINTER_KIND = kind
+
     return _CHECKPOINTER
 
 
 def reset_checkpointer() -> None:
     """Reset cached checkpoint manager (used by tests)."""
 
-    global _CHECKPOINTER
+    global _CHECKPOINTER, _CHECKPOINTER_KIND
     _CHECKPOINTER = None
+    _CHECKPOINTER_KIND = None
 
 
 __all__ = [
     "Checkpoint",
     "CheckpointManager",
     "Checkpointer",
+    "InMemoryCheckpointer",
+    "RedisCheckpointer",
     "RunState",
     "RunStatus",
     "get_checkpointer",
     "reset_checkpointer",
 ]
-
