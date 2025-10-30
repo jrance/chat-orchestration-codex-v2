@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Mapping, MutableMapping, Optional, Sequence
 
+from app.compiler.types import OrchestratorState
 from app.providers.openai_like.synth import compose_synthesis, score_candidates
+from app.runtime.agents import codeless as codeless_agent
 from app.runtime.context import RuntimeContext, get_runtime_context
 from app.runtime.types import ChildResult, ConcurrentResult
 from app.telemetry.events import (
@@ -22,6 +25,7 @@ from app.telemetry.events import (
     make_event,
 )
 from app.telemetry.streamer import TelemetryStreamer
+from app.tools.types import ToolSpec
 
 ChildRunner = Callable[[], Awaitable[ChildResult | Mapping[str, object]]]
 
@@ -53,6 +57,18 @@ class ConcurrentConfig:
 
 class _ChildTimeoutError(Exception):
     """Internal sentinel for child timeouts."""
+
+
+@dataclass(slots=True)
+class _ChildInfo:
+    """Snapshot of per-child settings used to build runner closures."""
+
+    node_id: str
+    label: str
+    node: Mapping[str, Any]
+    prompt: str
+    tools: Sequence[ToolSpec]
+    timeout_seconds: float | None = None
 
 
 def _as_float(value: object | None) -> float | None:
@@ -213,6 +229,175 @@ def _highest_confidence(results: Sequence[ChildResult]) -> ChildResult | None:
     return best
 
 
+def build_concurrent_runner(
+    node: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    child_ids: Sequence[str],
+    node_by_id: Mapping[str, Mapping[str, Any]],
+    agent_prompts: Mapping[str, str],
+    agent_tool_specs: Mapping[str, Sequence[ToolSpec]],
+    mcp_servers: Mapping[str, Mapping[str, Any]],
+) -> Callable[[OrchestratorState], Awaitable[OrchestratorState]]:
+    """Construct a LangGraph node runner that executes children concurrently."""
+
+    node_id = node["id"]
+    label = node.get("label") or node_id
+
+    strategy = str(config.get("strategy") or "FirstBest")
+    synth_prompt = config.get("synth_prompt")
+    first_best_threshold = config.get("first_best_threshold")
+    try:
+        timeout_seconds = float(config.get("timeout_seconds") or 120.0)
+    except (TypeError, ValueError):
+        timeout_seconds = 120.0
+    if timeout_seconds <= 0:
+        timeout_seconds = 120.0
+    try:
+        max_parallelism = int(config.get("max_parallelism") or 4)
+    except (TypeError, ValueError):
+        max_parallelism = 4
+    if max_parallelism <= 0:
+        max_parallelism = 4
+
+    cfg_obj = ConcurrentConfig(
+        node_id=node_id,
+        label=label,
+        strategy=strategy,
+        timeout_seconds=timeout_seconds,
+        max_parallelism=max_parallelism,
+        cancel_remaining_on_decision=bool(config.get("cancel_remaining_on_decision", True)),
+        synth_prompt=synth_prompt if isinstance(synth_prompt, str) and synth_prompt.strip() else None,
+        first_best_threshold=float(first_best_threshold) if isinstance(first_best_threshold, (int, float)) else None,
+    )
+
+    child_infos: list[_ChildInfo] = []
+    for child_id in child_ids:
+        child_node = node_by_id.get(child_id)
+        if not isinstance(child_node, Mapping):
+            continue
+        if child_node.get("kind") != "agent.codeless":
+            raise ValueError(f"Unsupported child kind '{child_node.get('kind')}' for concurrent node '{node_id}'")
+        prompt = agent_prompts.get(child_id, "")
+        tools = agent_tool_specs.get(child_id, [])
+        timeout_override = child_node.get("data", {}).get("timeoutSeconds")
+        try:
+            timeout_override_value = float(timeout_override) if timeout_override is not None else None
+        except (TypeError, ValueError):
+            timeout_override_value = None
+        if timeout_override_value is not None and timeout_override_value <= 0:
+            timeout_override_value = None
+        child_infos.append(
+            _ChildInfo(
+                node_id=child_id,
+                label=child_node.get("label") or child_id,
+                node=child_node,
+                prompt=prompt,
+                tools=tools,
+                timeout_seconds=timeout_override_value,
+            )
+        )
+
+    if not child_infos:
+        raise ValueError(f"Concurrent node '{node_id}' must have at least one valid child")
+
+    async def _run(state: OrchestratorState) -> OrchestratorState:
+        base_state = copy.deepcopy(state)
+        runtime_ctx = get_runtime_context()
+        telemetry = runtime_ctx.telemetry if runtime_ctx else None
+
+        child_specs: list[ConcurrentChildSpec] = []
+
+        for info in child_infos:
+
+            async def _runner(info: _ChildInfo = info) -> ChildResult:
+                child_state = copy.deepcopy(base_state)
+                llm_result = await codeless_agent.invoke_llm(
+                    child_state,
+                    info.node,
+                    info.prompt,
+                    attached_tools=info.tools,
+                    mcp_servers=mcp_servers,
+                )
+                response = llm_result.response if isinstance(llm_result.response, Mapping) else {}
+                confidence_value = response.get("confidence") if isinstance(response, Mapping) else None
+                if isinstance(confidence_value, (int, float)):
+                    confidence = float(confidence_value)
+                else:
+                    confidence = None
+                usage_payload = llm_result.usage if isinstance(llm_result.usage, Mapping) else None
+                meta_payload: Dict[str, Any] = {"response": response}
+
+                return ChildResult(
+                    {
+                        "nodeId": info.node_id,
+                        "label": info.label,
+                        "status": "completed",
+                        "output_text": llm_result.output_text,
+                        "confidence": confidence,
+                        "usage": dict(usage_payload) if usage_payload else None,
+                        "error": None,
+                        "meta": meta_payload,
+                    }
+                )
+
+            child_specs.append(
+                ConcurrentChildSpec(
+                    node_id=info.node_id,
+                    label=info.label,
+                    runner=_runner,
+                    timeout_seconds=info.timeout_seconds,
+                )
+            )
+
+        concurrent_result = await run_concurrent(
+            child_specs,
+            cfg_obj,
+            runtime_ctx=runtime_ctx,
+            telemetry=telemetry,
+        )
+
+        scratch = state.setdefault("scratch", {})
+        agents_store = scratch.setdefault("agents", {})
+        concurrent_store = scratch.setdefault("concurrent", {})
+
+        concurrent_payload = copy.deepcopy(concurrent_result)
+        concurrent_store[node_id] = concurrent_payload
+
+        final_text = ""
+        usage_summary: Dict[str, Any] | None = None
+        if cfg_obj.strategy == "Synthesize":
+            merged = concurrent_result.get("merged_text")
+            if isinstance(merged, str):
+                final_text = merged
+        else:
+            chosen = concurrent_result.get("chosen")
+            if isinstance(chosen, Mapping):
+                final_text = str(chosen.get("output_text") or "")
+                usage_value = chosen.get("usage")
+                if isinstance(usage_value, Mapping):
+                    usage_summary = dict(usage_value)
+
+        if final_text:
+            messages = list(state.get("messages") or [])
+            messages.append({"role": "assistant", "content": final_text})
+            state["messages"] = messages
+
+        agent_entry: Dict[str, Any] = {
+            "last_output_text": final_text,
+            "last_response": copy.deepcopy(concurrent_result),
+            "strategy": cfg_obj.strategy,
+            "children": copy.deepcopy(concurrent_result.get("children") or []),
+        }
+        if usage_summary:
+            agent_entry["usage"] = usage_summary
+
+        agents_store[node_id] = agent_entry
+        return state
+
+    return _run
+
+
 async def run_concurrent(
     children: Sequence[ConcurrentChildSpec],
     cfg: ConcurrentConfig,
@@ -334,4 +519,4 @@ async def run_concurrent(
     )
 
 
-__all__ = ["ConcurrentChildSpec", "ConcurrentConfig", "run_concurrent"]
+__all__ = ["ConcurrentChildSpec", "ConcurrentConfig", "build_concurrent_runner", "run_concurrent"]

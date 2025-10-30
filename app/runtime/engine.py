@@ -14,6 +14,7 @@ from app.compiler.types import OrchestratorState
 from app.ir.loader import build_runtime_plan
 from app.runtime.agents.codeless import stream_codeless
 from app.runtime.context import RuntimeContext, reset_runtime_context, set_runtime_context
+from app.runtime.patterns.concurrent import build_concurrent_runner
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streamer import TelemetryStreamer
@@ -278,6 +279,7 @@ async def run_stream(
     prompt = (plan.get("agentPrompts") or {}).get(entry_id, "")
     attached_tools = (plan.get("agentToolSpecs") or {}).get(entry_id, [])
     mcp_servers = plan.get("mcpServers") or {}
+    runtime_concurrent = plan.get("runtimeConcurrent") or {}
 
     initial_state: OrchestratorState = {"messages": []}
     user_message = _user_message_from_input(user_input)
@@ -294,18 +296,86 @@ async def run_stream(
 
     token = set_runtime_context(RuntimeContext(execution=context, telemetry=telemetry))
     try:
-        async for payload in stream_codeless(
-            initial_state,
-            node,
-            prompt,
-            attached_tools=attached_tools,
-            mcp_servers=mcp_servers,
-        ):
-            data = dict(payload)
-            data.setdefault("run_id", context.run_id)
-            data.setdefault("thread_id", context.thread_id)
-            event_type = str(data.get("type", payload.get("type", "message")))
-            yield RunStreamEvent(event=event_type, data=data)
+        if node.get("kind") == "concurrent":
+            concurrent_meta = runtime_concurrent.get(entry_id)
+            if not concurrent_meta:
+                raise ValueError(f"Concurrent node '{entry_id}' missing runtime metadata")
+            runner = build_concurrent_runner(
+                node,
+                config=concurrent_meta.get("cfg") or {},
+                child_ids=concurrent_meta.get("children") or [],
+                node_by_id=plan.get("nodeById") or {},
+                agent_prompts=plan.get("agentPrompts") or {},
+                agent_tool_specs=plan.get("agentToolSpecs") or {},
+                mcp_servers=mcp_servers,
+            )
+            state_after = await runner(initial_state)
+            scratch = state_after.get("scratch") or {}
+            agents_store = scratch.get("agents") or {}
+            agent_entry = agents_store.get(entry_id) or {}
+            final_text = str(agent_entry.get("last_output_text") or "")
+            usage_payload = agent_entry.get("usage")
+            usage = dict(usage_payload) if isinstance(usage_payload, Mapping) else _usage(_flatten_input(user_input), final_text)
+            concurrent_payload = (scratch.get("concurrent") or {}).get(entry_id) or {}
+            chosen_meta = concurrent_payload.get("chosen") if isinstance(concurrent_payload, Mapping) else None
+            if isinstance(concurrent_payload, Mapping):
+                chosen_meta = concurrent_payload.get("chosen")
+            else:
+                chosen_meta = None
+            chosen_node_id = None
+            if isinstance(chosen_meta, Mapping):
+                chosen_node_id = chosen_meta.get("nodeId")
+            children_list = []
+            if isinstance(concurrent_payload, Mapping):
+                children_list = concurrent_payload.get("children") or []
+            created = {
+                "type": "response.created",
+                "run_id": context.run_id,
+                "thread_id": context.thread_id,
+                "status": "in_progress",
+            }
+            yield RunStreamEvent(event="response.created", data=created)
+            if final_text:
+                yield RunStreamEvent(
+                    event="response.output_text.delta",
+                    data={
+                        "type": "response.output_text.delta",
+                        "delta": final_text,
+                        "run_id": context.run_id,
+                        "thread_id": context.thread_id,
+                    },
+                )
+            completed_payload = {
+                "type": "response.completed",
+                "run_id": context.run_id,
+                "thread_id": context.thread_id,
+                "output_text": final_text,
+                "usage": usage,
+                "response": {
+                    "id": context.run_id or entry_id,
+                    "metadata": {
+                        "concurrent": {
+                            "strategy": concurrent_payload.get("strategy") if isinstance(concurrent_payload, Mapping) else None,
+                            "childrenCount": len(children_list),
+                            "chosenNodeId": chosen_node_id,
+                        }
+                    },
+                },
+            }
+            yield RunStreamEvent(event="response.completed", data=completed_payload)
+        else:
+            async for payload in stream_codeless(
+                initial_state,
+                node,
+                prompt,
+                attached_tools=attached_tools,
+                mcp_servers=mcp_servers,
+            ):
+                data = dict(payload)
+                data.setdefault("run_id", context.run_id)
+                data.setdefault("thread_id", context.thread_id)
+                event_type = str(data.get("type", payload.get("type", "message")))
+                yield RunStreamEvent(event=event_type, data=data)
     finally:
         reset_runtime_context(token)
 
