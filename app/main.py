@@ -8,6 +8,7 @@ from app.api.v1.routes_validate import router as validate_router
 from app.config.settings import settings
 from app.logging import configure_logging, get_logger
 from app.middleware.request_ids import RequestIdMiddleware
+from docs.openapi_overrides import apply_openapi_overrides
 
 log = get_logger(__name__)
 
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(validate_router)
     app.include_router(compile_router)
     app.include_router(execute_router)
+    apply_openapi_overrides(app)
 
     return app
 

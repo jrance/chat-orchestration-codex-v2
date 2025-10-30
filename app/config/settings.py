@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     run_store_kind: str = "memory"
     state_ttl_sec: int | None = 86_400
     state_max_bytes: int | None = 5_242_880
+    redis_url: str | None = None
+    redis_emulator: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
@@ -98,7 +100,7 @@ class Settings(BaseSettings):
             return None
         return value if value > 0 else None
 
-    def state_max_bytes(self) -> int | None:
+    def state_max_bytes_limit(self) -> int | None:
         """Return configured approximate max bytes for in-memory persistence."""
 
         if self.state_max_bytes is None:
@@ -118,3 +120,4 @@ def reload_settings() -> Settings:
     new_settings = Settings()
     settings.__dict__.update(new_settings.__dict__)
     return settings
+

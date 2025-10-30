@@ -90,17 +90,29 @@ async def test_execute_endpoint(async_client: AsyncClient, stub_llm):
         "edges": [],
         "entryId": "agent",
     }
-    body = {"ir": ir, "input": "hello"}
+    body = {"orchestration": ir, "input": "hello"}
     response = await async_client.post(
         "/v1/execute",
         json=body,
         headers={"X-Tenant-Id": "tenant-1"},
     )
     payload = response.json()
-    assert response.status_code == 200
-    assert payload["ok"] is True
+    assert response.status_code == 201
     assert payload["runId"]
-    assert payload["message"] == "completed"
+    assert payload["status"] in {"running", "completed"}
+    assert payload["sse"]["url"].endswith(payload["runId"])
+
+
+@pytest.mark.anyio
+async def test_resume_missing_run(async_client: AsyncClient):
+    response = await async_client.post(
+        "/v1/execute/run-123/resume",
+        json={"kind": "continue"},
+        headers={"X-Tenant-Id": "tenant-1"},
+    )
+    payload = response.json()
+    assert response.status_code == 404
+    assert payload["detail"]["error"]["code"] == "RUN_NOT_FOUND"
 
 @pytest.mark.anyio
 async def test_resume_missing_run(async_client: AsyncClient):

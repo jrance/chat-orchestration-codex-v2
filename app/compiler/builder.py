@@ -88,6 +88,8 @@ class GraphBuilder:
     def _apply_conditional_edges(self) -> None:
         for node_id, registration in self._conditional.items():
             mapping = {target: target for target in registration.targets}
+            if registration.default_to_end:
+                mapping = {**mapping, END: END}
             if mapping:
                 self.graph.add_conditional_edges(node_id, registration.selector, mapping)
             else:
@@ -135,3 +137,5 @@ class GraphBuilder:
         except RuntimeError:
             return self.graph.compile()
         return self.graph.compile(checkpointer=checkpointer)
+
+

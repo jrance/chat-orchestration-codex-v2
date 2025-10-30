@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from app.api.deps import ExecutionContext
+from app.api.models import ExecutionHeaders
 from app.compiler.registry import get as get_compiled_graph
 from app.compiler.types import OrchestratorState
 from app.ir.loader import build_runtime_plan
@@ -77,6 +79,142 @@ def _usage(text_in: str, text_out: str) -> Dict[str, int]:
         "input_tokens": max(1, len(text_in.split())) if text_in else 0,
         "output_tokens": max(1, len(text_out.split())) if text_out else 0,
     }
+
+
+def _coerce_thread_id(
+    run_id: str,
+    state: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    checkpoint: Checkpoint | None = None,
+) -> str:
+    thread_id = metadata.get("thread_id")
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    state_thread = state.get("thread_id")
+    if isinstance(state_thread, str) and state_thread:
+        return state_thread
+    if checkpoint and checkpoint.thread_id:
+        return str(checkpoint.thread_id)
+    return run_id
+
+
+def _pause_payload(
+    state: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> Dict[str, Any] | None:
+    status_raw = state.get("status") or metadata.get("status")
+    status = RunStatus.from_raw(
+        str(status_raw) if status_raw is not None else None,
+        RunStatus.RUNNING,
+    )
+    if status is not RunStatus.PAUSED:
+        return None
+
+    pause_reason = metadata.get("pause_reason") or state.get("pause_reason")
+    pause_meta = metadata.get("pause_metadata") or state.get("pause_metadata")
+    router_meta = metadata.get("router")
+    router_hitl = router_meta.get("hitl") if isinstance(router_meta, Mapping) else None
+    top_level_hitl = metadata.get("hitl") if isinstance(metadata.get("hitl"), Mapping) else None
+    response_meta = metadata.get("response")
+    response_hitl = None
+    if isinstance(response_meta, Mapping):
+        response_metadata = response_meta.get("metadata")
+        if isinstance(response_metadata, Mapping):
+            candidate = response_metadata.get("hitl")
+            if isinstance(candidate, Mapping):
+                response_hitl = candidate
+    if not isinstance(pause_meta, Mapping):
+        pause_meta = None
+    if router_hitl and not pause_meta:
+        pause_meta = {"hitl": router_hitl}
+    if top_level_hitl and not pause_meta:
+        pause_meta = {"hitl": top_level_hitl}
+    if response_hitl and not pause_meta:
+        pause_meta = {"hitl": response_hitl}
+    if not pause_reason:
+        candidate_hitl = router_hitl or top_level_hitl or response_hitl
+        if isinstance(candidate_hitl, Mapping):
+            pause_reason = candidate_hitl.get("reason")
+    if not pause_reason and not pause_meta:
+        return None
+    payload: Dict[str, Any] = {
+        "reason": pause_reason if isinstance(pause_reason, str) else None,
+        "prompt": None,
+        "targets": None,
+        "metadata": None,
+    }
+    if isinstance(pause_meta, Mapping):
+        hitl = pause_meta.get("hitl") if isinstance(pause_meta.get("hitl"), Mapping) else pause_meta
+        if isinstance(hitl, Mapping):
+            prompt = hitl.get("prompt")
+            targets = hitl.get("targets")
+            payload["prompt"] = prompt if isinstance(prompt, str) else None
+            if isinstance(targets, list):
+                payload["targets"] = [str(item) for item in targets]
+            payload["metadata"] = copy.deepcopy(dict(hitl))
+        else:
+            payload["metadata"] = copy.deepcopy(dict(pause_meta))
+    return payload
+
+
+def _extract_usage_metadata(state: Mapping[str, Any], metadata: Mapping[str, Any]) -> Dict[str, Any] | None:
+    usage = metadata.get("usage")
+    if isinstance(usage, Mapping):
+        return dict(usage)
+    response = metadata.get("response")
+    if isinstance(response, Mapping):
+        usage_payload = response.get("usage")
+        if isinstance(usage_payload, Mapping):
+            return dict(usage_payload)
+    scratch = state.get("scratch")
+    if isinstance(scratch, Mapping):
+        agents = scratch.get("agents")
+        if isinstance(agents, Mapping) and agents:
+            for entry in agents.values():
+                if isinstance(entry, Mapping):
+                    usage_payload = entry.get("usage")
+                    if isinstance(usage_payload, Mapping):
+                        return dict(usage_payload)
+    usage_state = state.get("usage")
+    if isinstance(usage_state, Mapping):
+        return dict(usage_state)
+    return None
+
+
+def _build_run_status_payload(
+    run_id: str,
+    state: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    *,
+    checkpoint: Checkpoint | None = None,
+) -> Dict[str, Any]:
+    status_raw = state.get("status") or metadata.get("status")
+    status = RunStatus.from_raw(
+        str(status_raw) if status_raw is not None else None,
+        RunStatus.RUNNING,
+    )
+    thread_id = _coerce_thread_id(run_id, state, metadata, checkpoint)
+    pause_payload = _pause_payload(state, metadata)
+    usage = _extract_usage_metadata(state, metadata)
+    metadata_payload = copy.deepcopy(dict(metadata))
+    metadata_payload.pop("pause_metadata", None)
+    metadata_payload.pop("pause_reason", None)
+    payload: Dict[str, Any] = {
+        "runId": run_id,
+        "threadId": thread_id,
+        "status": status.value,
+        "sse": {"url": f"/v1/execute/stream?runId={run_id}"},
+        "usage": usage,
+        "metadata": metadata_payload or None,
+        "pause": pause_payload,
+    }
+    if pause_payload is None:
+        payload.pop("pause")
+    if usage is None:
+        payload.pop("usage")
+    if not metadata_payload:
+        payload.pop("metadata")
+    return payload
 
 
 def _copy_sequence(value: Any) -> List[Any]:
@@ -260,10 +398,13 @@ async def execute_once(
     raw_status = str(output_state.get("status") or "").strip() or "completed"
     run_status_enum = RunStatus.from_raw(raw_status, RunStatus.COMPLETED)
     output_state["status"] = run_status_enum.value
-    pause_metadata = output_state.get("pause_metadata") if run_status_enum is RunStatus.PAUSED else None
-    pause_reason = output_state.get("pause_reason") if run_status_enum is RunStatus.PAUSED else None
+    pause_metadata = output_state.get("pause_metadata")
     if pause_metadata is not None and not isinstance(pause_metadata, Mapping):
         pause_metadata = None
+    if pause_metadata:
+        run_status_enum = RunStatus.PAUSED
+        output_state["status"] = run_status_enum.value
+    pause_reason = output_state.get("pause_reason")
 
     record_metadata = _resolve_metadata(previous, checkpoint, metadata, state_in)
     record_metadata["status"] = run_status_enum.value
@@ -291,29 +432,182 @@ async def execute_once(
     return output_state
 
 
-async def resume_run(
-    graph_id: str,
-    run_id: str,
-    state_in: Mapping[str, Any] | None = None,
-    *,
-    metadata: Mapping[str, Any] | None = None,
-    context: ExecutionContext | None = None,
-    telemetry: TelemetryStreamer | None = None,
-) -> OrchestratorState:
-    """Resume a previously-started run by replaying the compiled graph."""
+def get_run_status(run_id: str) -> Dict[str, Any]:
+    """Return the latest run status payload for ``run_id``."""
 
     store = get_run_state_store()
     record = store.get_state(run_id)
-    if record is None and get_checkpointer().load_checkpoint(run_id) is None:
+    checkpoint_manager = get_checkpointer()
+    checkpoint = checkpoint_manager.load_checkpoint(run_id)
+
+    if record is None and checkpoint is None:
         raise ValueError(f"Run '{run_id}' not found")
-    return await execute_once(
+
+    state: Mapping[str, Any]
+    metadata: Mapping[str, Any]
+    if record is not None:
+        state = copy.deepcopy(record.state)
+        metadata = copy.deepcopy(record.metadata)
+    elif checkpoint is not None:
+        state = copy.deepcopy(checkpoint.state)
+        metadata = copy.deepcopy(checkpoint.metadata)
+    else:  # pragma: no cover - defensive fallback
+        state, metadata = {}, {}
+
+    return _build_run_status_payload(run_id, state, metadata, checkpoint=checkpoint)
+
+
+async def resume_run(
+    run_id: str,
+    *,
+    resume_kind: str,
+    payload: Mapping[str, Any] | None,
+    tenant_id: str,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
+) -> Dict[str, Any]:
+    """Resume a paused run and return the updated ``RunStatus`` payload."""
+
+    store = get_run_state_store()
+    checkpoint_manager = get_checkpointer()
+    record = store.get_state(run_id)
+    checkpoint = checkpoint_manager.load_checkpoint(run_id)
+
+    if record is None and checkpoint is None:
+        raise ValueError("RUN_NOT_FOUND")
+
+    state_source: Mapping[str, Any]
+    metadata_source: Mapping[str, Any]
+    if record is not None:
+        state_source = record.state
+        metadata_source = record.metadata
+    elif checkpoint is not None:
+        state_source = checkpoint.state
+        metadata_source = checkpoint.metadata
+    else:  # pragma: no cover - defensive
+        state_source, metadata_source = {}, {}
+
+    status_raw = state_source.get("status") or metadata_source.get("status")
+    status = RunStatus.from_raw(
+        str(status_raw) if status_raw is not None else None,
+        RunStatus.RUNNING,
+    )
+    if status is not RunStatus.PAUSED:
+        raise ValueError("RUN_NOT_PAUSED")
+
+    resume_state = copy.deepcopy(state_source)
+    metadata_update = copy.deepcopy(dict(metadata_source))
+    metadata_update["resume_kind"] = resume_kind
+    metadata_update["resume_requested_at"] = time.time()
+    if payload:
+        metadata_update["resume_payload"] = copy.deepcopy(dict(payload))
+
+    kind_lower = str(resume_kind).lower()
+
+    if kind_lower == "router_choice":
+        choice = (payload or {}).get("choice") if payload else None
+        if not isinstance(choice, Mapping):
+            raise ValueError("RESUME_CHOICE_REQUIRED")
+        target_value = choice.get("target")
+        if not isinstance(target_value, str) or not target_value.strip():
+            raise ValueError("RESUME_CHOICE_TARGET_REQUIRED")
+        target = target_value.strip()
+        scratch = resume_state.get("scratch") or {}
+        router_store = scratch.get("router") or {}
+        selected_router_id: str | None = None
+        selected_entry: Mapping[str, Any] | None = None
+        for router_id, router_entry in router_store.items():
+            if not isinstance(router_entry, Mapping):
+                continue
+            decision = router_entry.get("decision")
+            if isinstance(decision, Mapping) and decision.get("source") == "paused":
+                selected_router_id = str(router_id)
+                selected_entry = router_entry
+                break
+        if selected_router_id is None or selected_entry is None:
+            raise ValueError("RESUME_ROUTER_NOT_FOUND")
+        target_map = selected_entry.get("target_to_child")
+        if not isinstance(target_map, Mapping):
+            target_map = {}
+        child_labels = selected_entry.get("child_labels")
+        if not isinstance(child_labels, Mapping):
+            child_labels = {}
+        node_id = target_map.get(target)
+        label = target if node_id else None
+        if node_id is None and target in child_labels:
+            node_id = target
+            label = child_labels.get(target, target)
+        if node_id is None:
+            lowered = target.lower()
+            for candidate_label, candidate_node in target_map.items():
+                if candidate_label.lower() == lowered:
+                    node_id = candidate_node
+                    label = candidate_label
+                    break
+        if node_id is None and isinstance(choice.get("targetNodeId"), str):
+            node_id = choice["targetNodeId"]
+            label = child_labels.get(node_id, target)
+        if node_id is None:
+            raise ValueError("RESUME_CHOICE_TARGET_NOT_FOUND")
+        resume_state.setdefault("pending_router_choice", {})
+        pending = resume_state["pending_router_choice"]
+        if isinstance(pending, Mapping):
+            merged = dict(pending)
+        else:
+            merged = {}
+        merged[selected_router_id] = {
+            "target": target,
+            "targetNodeId": node_id,
+            "targetLabel": label,
+        }
+        resume_state["pending_router_choice"] = merged
+        resume_state["status"] = "running"
+        resume_state.pop("pause_metadata", None)
+        resume_state.pop("pause_reason", None)
+    elif kind_lower == "user_message":
+        message = (payload or {}).get("message")
+        if isinstance(message, str):
+            message_content = message.strip()
+            if not message_content:
+                raise ValueError("RESUME_MESSAGE_EMPTY")
+            messages = list(resume_state.get("messages") or [])
+            messages.append({"role": "user", "content": message_content, "ts": time.time()})
+            resume_state["messages"] = messages
+        elif isinstance(message, Mapping) or isinstance(message, list):
+            messages = list(resume_state.get("messages") or [])
+            messages.append(message)  # type: ignore[arg-type]
+            resume_state["messages"] = messages
+        else:
+            raise ValueError("RESUME_MESSAGE_REQUIRED")
+        resume_state["status"] = "running"
+        resume_state.pop("pause_metadata", None)
+        resume_state.pop("pause_reason", None)
+    elif kind_lower in {"moderation_ack", "continue"}:
+        resume_state["status"] = "running"
+        resume_state.pop("pause_metadata", None)
+        resume_state.pop("pause_reason", None)
+    else:
+        raise ValueError("RESUME_KIND_UNSUPPORTED")
+
+    graph_id = f"runtime-{run_id}"
+    if not get_compiled_graph(graph_id):
+        raise ValueError("RESUME_GRAPH_NOT_FOUND")
+
+    headers = ExecutionHeaders(
+        tenant_id=tenant_id,
+        correlation_id=correlation_id or uuid.uuid4().hex,
+        request_id=request_id or uuid.uuid4().hex,
+    )
+    context = ExecutionContext(headers=headers, run_id=run_id, thread_id=_coerce_thread_id(run_id, resume_state, metadata_update, checkpoint))
+
+    await execute_once(
         graph_id,
         run_id,
-        state_in,
-        metadata=metadata,
+        resume_state,
+        metadata=metadata_update,
         context=context,
-        telemetry=telemetry,
     )
+    return get_run_status(run_id)
 
 
 async def run_stream(
@@ -553,9 +847,8 @@ async def run_once(
     scratch = _agent_scratch(final_state, entry_id)
     router_info = _router_state(final_state, entry_id)
     run_status = str(final_state.get("status") or "completed")
-    pause_metadata = final_state.get("pause_metadata") if run_status == "paused" else {}
-    if not isinstance(pause_metadata, Mapping):
-        pause_metadata = {}
+    pause_metadata_raw = final_state.get("pause_metadata")
+    pause_metadata = pause_metadata_raw if isinstance(pause_metadata_raw, Mapping) else {}
 
     output_text = str(scratch.get("last_output_text") or _last_assistant_text(final_state))
     usage_payload = scratch.get("usage")
@@ -577,6 +870,11 @@ async def run_once(
     router_decision = router_info.get("decision") if isinstance(router_info, Mapping) else None
     if isinstance(router_decision, Mapping) and router_decision:
         metadata_block["router"] = copy.deepcopy(router_decision)
+        if router_decision.get("source") == "paused" and router_decision.get("hitl"):
+            metadata_block["hitl"] = copy.deepcopy(router_decision["hitl"])
+            final_state["pause_metadata"] = {"hitl": copy.deepcopy(router_decision["hitl"])}
+            final_state["pause_reason"] = router_decision.get("reason") or router_decision.get("fallbackMode") or "router.ask_user"
+            run_status = "paused"
     groupchat_meta = scratch.get("groupchat")
     if isinstance(groupchat_meta, Mapping):
         participants_labels = list(groupchat_meta.get("participants") or [])
@@ -590,9 +888,39 @@ async def run_once(
         if stop_reason:
             groupchat_metadata["stopReason"] = stop_reason
         metadata_block["groupchat"] = groupchat_metadata
-    if pause_metadata:
+    if pause_metadata and not metadata_block.get("hitl"):
         metadata_block["hitl"] = copy.deepcopy(pause_metadata.get("hitl", pause_metadata))
+        run_status = "paused"
     response_payload["status"] = run_status
+
+    pause_meta_store = metadata_block.get("hitl") if isinstance(metadata_block.get("hitl"), Mapping) else None
+    if run_status == "paused":
+        store = get_run_state_store()
+        record = store.get_state(context.run_id or "")
+        if record is not None:
+            updated_metadata = copy.deepcopy(record.metadata)
+            updated_metadata["status"] = "paused"
+            if pause_meta_store:
+                updated_metadata["pause_metadata"] = {"hitl": copy.deepcopy(pause_meta_store)}
+                updated_metadata["pause_reason"] = pause_meta_store.get("reason") or "router.ask_user"
+            pause_state = copy.deepcopy(record.state)
+            pause_state["status"] = "paused"
+            if pause_meta_store:
+                pause_state["pause_metadata"] = {"hitl": copy.deepcopy(pause_meta_store)}
+                pause_state["pause_reason"] = pause_meta_store.get("reason") or "router.ask_user"
+            store.put_state(
+                RunStateRecord(
+                    run_id=record.run_id,
+                    state=pause_state,
+                    metadata=updated_metadata,
+                )
+            )
+        pause_checkpoint_metadata = {"hitl": copy.deepcopy(pause_meta_store)} if pause_meta_store else {}
+        get_checkpointer().mark_status(
+            context.run_id or "",
+            RunStatus.PAUSED,
+            metadata={"pause_metadata": pause_checkpoint_metadata},
+        )
 
     if telemetry and telemetry.enabled():
         await telemetry.publish(

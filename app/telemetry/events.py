@@ -21,6 +21,8 @@ ROUTER_FALLBACK = "telemetry.router.fallback"
 GROUPCHAT_TURN_DELTA = "telemetry.groupchat.turn.delta"
 GROUPCHAT_TURN_COMPLETED = "telemetry.groupchat.turn.completed"
 GROUPCHAT_RUN_COMPLETED = "telemetry.groupchat.completed"
+RESUME_RUN_STARTED = "telemetry.resume.start"
+RESUME_RUN_COMPLETED = "telemetry.resume.completed"
 
 
 def make_event(event: str, payload: Mapping[str, Any]) -> TelemetryEvent:
@@ -42,6 +44,8 @@ __all__ = [
     "GROUPCHAT_RUN_COMPLETED",
     "GROUPCHAT_TURN_COMPLETED",
     "GROUPCHAT_TURN_DELTA",
+    "RESUME_RUN_COMPLETED",
+    "RESUME_RUN_STARTED",
     "ROUTER_DECISION",
     "ROUTER_FALLBACK",
     "ROUTER_RUN_STARTED",

@@ -65,14 +65,14 @@ def _stub_llm(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.anyio
 async def test_execute_requires_tenant(async_client: AsyncClient):
-    response = await async_client.post("/v1/execute", json={"ir": _sample_ir(), "input": "hi"})
+    response = await async_client.post("/v1/execute", json={"orchestration": _sample_ir(), "input": "hi"})
     assert response.status_code == 400
     assert "X-Tenant-Id" in response.text
 
 
 @pytest.mark.anyio
 async def test_execute_returns_result(async_client: AsyncClient):
-    body = {"ir": _sample_ir(), "input": "hello world"}
+    body = {"orchestration": _sample_ir(), "input": "hello world"}
     response = await async_client.post(
         "/v1/execute",
         json=body,
@@ -80,16 +80,16 @@ async def test_execute_returns_result(async_client: AsyncClient):
     )
 
     data = response.json()
-    assert response.status_code == 200
-    assert data["ok"] is True
+    assert response.status_code == 201
     assert data["runId"]
-    assert data["output_text"] == "stub response"
-    assert data["usage"]["output_tokens"] == 2
+    assert data["status"] in {"running", "completed"}
+    assert data["sse"]["url"].endswith(data["runId"])
+    assert data.get("usage", {}).get("output_tokens") == 3
 
 
 @pytest.mark.anyio
 async def test_stream_emits_response_events(async_client: AsyncClient):
-    body = {"ir": _sample_ir(), "input": "stream me"}
+    body = {"orchestration": _sample_ir(), "input": "stream me"}
     response = await async_client.post(
         "/v1/execute/stream",
         json=body,
@@ -106,7 +106,7 @@ async def test_stream_emits_response_events(async_client: AsyncClient):
 
 @pytest.mark.anyio
 async def test_tenant_mismatch_rejected(async_client: AsyncClient):
-    body = {"ir": _sample_ir(tenant="other-tenant"), "input": "hi"}
+    body = {"orchestration": _sample_ir(tenant="other-tenant"), "input": "hi"}
     response = await async_client.post(
         "/v1/execute",
         json=body,
@@ -118,7 +118,7 @@ async def test_tenant_mismatch_rejected(async_client: AsyncClient):
 
 @pytest.mark.anyio
 async def test_stream_returns_telemetry_header(async_client: AsyncClient):
-    body = {"ir": _sample_ir(), "input": "telemetry please"}
+    body = {"orchestration": _sample_ir(), "input": "telemetry please"}
     response = await async_client.post(
         "/v1/execute/stream",
         json=body,
@@ -141,3 +141,5 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
     telemetry_payload = (await telemetry_response.aread()).decode()
     assert "event: telemetry.run_started" in telemetry_payload
     assert "event: telemetry.run_completed" in telemetry_payload
+
+

@@ -339,6 +339,88 @@ def build_router_runner(
 
     async def _run(state: OrchestratorState) -> OrchestratorState:
         base_state = copy.deepcopy(state)
+
+        pending_choices = base_state.get("pending_router_choice")
+        resume_payload: Any | None = None
+        if isinstance(pending_choices, Mapping):
+            if cfg.node_id in pending_choices:
+                resume_payload = pending_choices[cfg.node_id]
+                remaining = dict(pending_choices)
+                remaining.pop(cfg.node_id, None)
+                if remaining:
+                    base_state["pending_router_choice"] = remaining
+                else:
+                    base_state.pop("pending_router_choice", None)
+        elif pending_choices is not None and cfg.node_id == pending_choices:
+            resume_payload = pending_choices
+            base_state.pop("pending_router_choice", None)
+
+        if resume_payload is not None:
+            target_hint: str | None = None
+            target_node_id: str | None = None
+            target_label: str | None = None
+            if isinstance(resume_payload, Mapping):
+                target_node_id = resume_payload.get("targetNodeId") or resume_payload.get("target_node_id")
+                target_label = resume_payload.get("targetLabel") or resume_payload.get("target_label")
+                target_hint = (
+                    resume_payload.get("target")
+                    or target_label
+                    or target_node_id
+                )
+            else:
+                target_hint = str(resume_payload)
+
+            if target_node_id and target_node_id in child_labels:
+                target_label = child_labels.get(target_node_id, target_node_id)
+            elif target_label and target_label in target_to_child:
+                target_node_id = target_to_child[target_label]
+            elif target_hint:
+                if target_hint in target_to_child:
+                    target_node_id = target_to_child[target_hint]
+                    target_label = target_hint
+                elif target_hint in child_labels:
+                    target_node_id = target_hint
+                    target_label = child_labels.get(target_hint, target_hint)
+                else:
+                    lowered = target_hint.lower()
+                    for label, node_id in target_to_child.items():
+                        if label.lower() == lowered:
+                            target_node_id = node_id
+                            target_label = label
+                            break
+            if not target_node_id:
+                raise NoRouteError("ROUTER_RESUME_TARGET_NOT_FOUND")
+
+            base_state["status"] = "running"
+            base_state.pop("pause_metadata", None)
+            base_state.pop("pause_reason", None)
+            base_state["route"] = {
+                "target": target_node_id,
+                "label": target_label,
+                "source": "resume",
+            }
+            scratch = base_state.setdefault("scratch", {})
+            router_store = scratch.setdefault("router", {})
+            router_entry = copy.deepcopy(router_store.get(cfg.node_id) or {})
+            decision_payload = copy.deepcopy(router_entry.get("decision") or {})
+            decision_payload.update(
+                {
+                    "nodeId": cfg.node_id,
+                    "label": cfg.label,
+                    "targetLabel": target_label,
+                    "targetNodeId": target_node_id,
+                    "source": "resume",
+                    "fallbackMode": None,
+                }
+            )
+            router_entry["decision"] = decision_payload
+            router_entry["targets"] = list(targets)
+            router_entry["target_to_child"] = dict(target_to_child)
+            router_entry["child_labels"] = dict(child_labels)
+            router_entry["children"] = list(child_ids)
+            router_store[cfg.node_id] = router_entry
+            return base_state
+
         runtime_ctx = get_runtime_context()
         telemetry: TelemetryStreamer | None = runtime_ctx.telemetry if runtime_ctx else None
         headers = runtime_ctx.http_headers() if runtime_ctx else {}
@@ -463,6 +545,9 @@ def build_router_runner(
         router_store[cfg.node_id] = {
             "decision": decision_payload,
             "targets": list(targets),
+            "target_to_child": dict(target_to_child),
+            "child_labels": dict(child_labels),
+            "children": list(child_ids),
             "raw": provider_response,
             "llm": dict(effective_decision),
         }

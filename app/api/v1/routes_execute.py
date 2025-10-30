@@ -11,9 +11,17 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
 from app.api.models import TelemetryLevel
+from app.api.schemas import RunRequest, RunStatus, ResumeRequest
 from app.config.settings import settings
 from app.ir.loader import build_runtime_plan
-from app.runtime.engine import ExecutionResult, RunStreamEvent, run_once, run_stream
+from app.runtime.engine import (
+    ExecutionResult,
+    RunStreamEvent,
+    get_run_status,
+    resume_run,
+    run_once,
+    run_stream,
+)
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.sse.streams import SSEMessage, message_stream
 from app.telemetry.models import TelemetryEvent
@@ -25,8 +33,6 @@ from app.telemetry.streamer import (
     register_streamer,
 )
 
-from .models import ExecuteRequest, ExecuteResponse, ResumeRequest
-
 router = APIRouter(prefix="/v1", tags=["v1"])
 
 _RUN_STATE_STORE = get_run_state_store()
@@ -34,12 +40,14 @@ _RUN_STATE_STORE = get_run_state_store()
 
 async def _create_context(
     request: Request,
-    req: ExecuteRequest,
+    req: RunRequest,
 ) -> tuple[ExecutionContext, Optional[TelemetryStreamer]]:
     headers = parse_execution_headers(request)
-    ensure_tenant_matches(req.ir, headers.tenant_id)
+    ensure_tenant_matches(req.orchestration, headers.tenant_id)
 
     context = ExecutionContext(headers=headers)
+    if req.thread_id:
+        context.thread_id = req.thread_id
     context.ensure_run_ids()
 
     telemetry: Optional[TelemetryStreamer] = None
@@ -80,51 +88,64 @@ async def _persist_run_state(result: ExecutionResult) -> None:
     if prior:
         metadata.update(copy.deepcopy(prior.metadata))
     metadata["thread_id"] = result.thread_id
+    status_value = str(
+        result.response.get("status")
+        or metadata.get("status")
+        or "completed"
+    )
+    metadata["status"] = status_value
+    if result.usage:
+        metadata["usage"] = dict(result.usage)
     metadata["response"] = copy.deepcopy(result.response)
     metadata["invocations"] = int(metadata.get("invocations", 0)) + 1
 
+    state_payload: Dict[str, Any] = {}
+    if prior:
+        state_payload = copy.deepcopy(prior.state)
+
+    state_payload["run_id"] = result.run_id
+    state_payload["status"] = status_value
+    state_payload["result"] = {
+        "output_text": result.output_text,
+        "usage": dict(result.usage),
+    }
+
     payload = RunStateRecord(
         run_id=result.run_id,
-        state={
-            "run_id": result.run_id,
-            "result": {
-                "output_text": result.output_text,
-                "usage": dict(result.usage),
-            },
-        },
+        state=state_payload,
         metadata=metadata,
     )
     _RUN_STATE_STORE.put_state(payload)
 
 
-@router.post("/execute", response_model=ExecuteResponse)
-async def execute(request: Request, req: ExecuteRequest) -> ExecuteResponse:
+@router.post(
+    "/execute",
+    response_model=RunStatus,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_201_CREATED,
+    tags=["execute"],
+)
+async def execute(request: Request, req: RunRequest) -> RunStatus:
     context, telemetry = await _create_context(request, req)
     try:
-        result = await run_once(req.ir, req.input, context, telemetry)
+        result = await run_once(req.orchestration, req.input, context, telemetry)
     except ValueError as exc:
         await _finalize_telemetry(context, telemetry)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await _persist_run_state(result)
     await _finalize_telemetry(context, telemetry)
 
-    return ExecuteResponse(
-        ok=True,
-        runId=result.run_id,
-        threadId=result.thread_id,
-        output_text=result.output_text,
-        usage=result.usage,
-        message="completed",
-    )
+    payload = get_run_status(result.run_id)
+    return RunStatus.model_validate(payload)
 
 
 async def _stream_response_events(
-    req: ExecuteRequest,
+    req: RunRequest,
     context: ExecutionContext,
     telemetry: Optional[TelemetryStreamer],
 ) -> AsyncIterator[SSEMessage]:
     last_completed: Optional[RunStreamEvent] = None
-    async for event in run_stream(req.ir, req.input, context, telemetry):
+    async for event in run_stream(req.orchestration, req.input, context, telemetry):
         if event.event == "response.completed":
             last_completed = event
         yield SSEMessage(event=event.event, data=event.data)
@@ -143,11 +164,11 @@ async def _stream_response_events(
     await _finalize_telemetry(context, telemetry, remove=False)
 
 
-@router.post("/execute/stream")
-async def execute_stream(request: Request, req: ExecuteRequest) -> StreamingResponse:
+@router.post("/execute/stream", tags=["execute"])
+async def execute_stream(request: Request, req: RunRequest) -> StreamingResponse:
     context, telemetry = await _create_context(request, req)
 
-    ok, _, errors = build_runtime_plan(req.ir, runtime_vars={})
+    ok, _, errors = build_runtime_plan(req.orchestration, runtime_vars={})
     if not ok:
         await _finalize_telemetry(context, telemetry)
         message = "; ".join(errors) if errors else "Invalid orchestration package"
@@ -168,30 +189,58 @@ async def execute_stream(request: Request, req: ExecuteRequest) -> StreamingResp
     )
 
 
-@router.post("/execute/{runId}/resume", response_model=ExecuteResponse)
-async def resume(request: Request, runId: str, body: ResumeRequest) -> ExecuteResponse:
-    parse_execution_headers(request)  # Ensures required headers are present
-    record = _RUN_STATE_STORE.get_state(runId)
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-
-    result_block = record.state.get("result", {})
-    output_text = str(result_block.get("output_text", ""))
-    if body.input:
-        supplement = _flatten_input(body.input)
-        if supplement:
-            output_text = f"{output_text}\n{supplement}".strip()
-
-    usage = dict(result_block.get("usage", {}))
-
-    return ExecuteResponse(
-        ok=True,
-        runId=runId,
-        threadId=str(record.metadata.get("thread_id", "")),
-        output_text=output_text,
-        usage=usage,
-        message="resumed",
-    )
+@router.post(
+    "/execute/{runId}/resume",
+    response_model=RunStatus,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_200_OK,
+    tags=["execute"],
+)
+async def resume_execution(request: Request, runId: str, body: ResumeRequest) -> RunStatus:
+    headers = parse_execution_headers(request)
+    payload = body.model_dump(exclude_none=True)
+    try:
+        result = await resume_run(
+            run_id=runId,
+            resume_kind=body.kind.value,
+            payload=payload,
+            tenant_id=headers.tenant_id or settings.default_tenant_id,
+            request_id=headers.request_id,
+            correlation_id=headers.correlation_id,
+        )
+    except ValueError as exc:
+        error_code = str(exc)
+        status_map = {
+            "RUN_NOT_FOUND": status.HTTP_404_NOT_FOUND,
+            "RUN_NOT_PAUSED": status.HTTP_409_CONFLICT,
+            "RESUME_CHOICE_REQUIRED": status.HTTP_400_BAD_REQUEST,
+            "RESUME_CHOICE_TARGET_REQUIRED": status.HTTP_400_BAD_REQUEST,
+            "RESUME_CHOICE_TARGET_NOT_FOUND": status.HTTP_400_BAD_REQUEST,
+            "RESUME_ROUTER_NOT_FOUND": status.HTTP_409_CONFLICT,
+            "RESUME_MESSAGE_REQUIRED": status.HTTP_400_BAD_REQUEST,
+            "RESUME_MESSAGE_EMPTY": status.HTTP_400_BAD_REQUEST,
+            "RESUME_KIND_UNSUPPORTED": status.HTTP_400_BAD_REQUEST,
+            "RESUME_GRAPH_NOT_FOUND": status.HTTP_409_CONFLICT,
+        }
+        message_map = {
+            "RUN_NOT_FOUND": "Unknown run",
+            "RUN_NOT_PAUSED": "Run is not paused",
+            "RESUME_CHOICE_REQUIRED": "Router choice payload is required",
+            "RESUME_CHOICE_TARGET_REQUIRED": "Router choice target is required",
+            "RESUME_CHOICE_TARGET_NOT_FOUND": "Router choice target does not match any branch",
+            "RESUME_ROUTER_NOT_FOUND": "Paused router context missing for run",
+            "RESUME_MESSAGE_REQUIRED": "Resume message payload is required",
+            "RESUME_MESSAGE_EMPTY": "Resume message must not be empty",
+            "RESUME_KIND_UNSUPPORTED": "Resume kind is not supported",
+            "RESUME_GRAPH_NOT_FOUND": "Compiled graph for run is unavailable",
+        }
+        http_status = status_map.get(error_code, status.HTTP_400_BAD_REQUEST)
+        detail_message = message_map.get(error_code, "Resume request invalid")
+        raise HTTPException(
+            status_code=http_status,
+            detail={"error": {"code": error_code, "message": detail_message}},
+        ) from exc
+    return RunStatus.model_validate(result)
 
 
 @router.get("/telemetry/stream")
@@ -214,15 +263,3 @@ async def telemetry_stream(request: Request, runId: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
-
-
-def _flatten_input(user_input: Any) -> str:
-    if user_input is None:
-        return ""
-    if isinstance(user_input, str):
-        return user_input
-    if isinstance(user_input, dict):
-        return " ".join(f"{key}:{_flatten_input(value)}" for key, value in user_input.items())
-    if isinstance(user_input, (list, tuple, set)):
-        return " ".join(_flatten_input(item) for item in user_input)
-    return str(user_input)

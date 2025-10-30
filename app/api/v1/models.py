@@ -31,27 +31,3 @@ class CompileResponse(BaseModel):
     graph_id: Optional[str] = None
     message: str = "Not implemented"
 
-
-class ExecuteRequest(BaseModel):
-    """Request payload for execution endpoints."""
-
-    ir: Dict[str, Any]
-    input: Any | None = None
-    options: Dict[str, Any] | None = None
-
-
-class ResumeRequest(BaseModel):
-    """Request payload when resuming a run."""
-
-    input: Any | None = None
-
-
-class ExecuteResponse(BaseModel):
-    """Response envelope for execution endpoints."""
-
-    ok: bool = False
-    runId: Optional[str] = None
-    threadId: Optional[str] = None
-    output_text: Optional[str] = None
-    usage: Dict[str, Any] | None = None
-    message: str = "Not implemented"

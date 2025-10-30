@@ -126,10 +126,15 @@ def _build_backend(kind: str) -> MemoryCheckpointBackend | RedisCheckpointBacken
     if kind == "memory":
         return MemoryCheckpointBackend(
             ttl_seconds=settings.state_ttl(),
-            max_bytes=settings.state_max_bytes(),
+            max_bytes=settings.state_max_bytes_limit(),
         )
     if kind == "redis":
-        return RedisCheckpointBackend()
+        return RedisCheckpointBackend(
+            url=settings.redis_url,
+            ttl_seconds=settings.state_ttl(),
+            namespace="orch",
+            emulate=settings.redis_emulator,
+        )
     raise ValueError(f"Unknown CHECKPOINTER_BACKEND '{kind}'")
 
 
@@ -166,3 +171,4 @@ __all__ = [
     "get_checkpointer",
     "reset_checkpointer",
 ]
+

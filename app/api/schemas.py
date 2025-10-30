@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict, field_validator
 
 
 class RunStatusEnum(str, Enum):
@@ -35,21 +35,50 @@ class ResumeChoice(BaseModel):
 class RunRequest(BaseModel):
     """Request payload for starting a new run."""
 
-    orchestration: Dict[str, Any] = Field(alias="orchestration")
+    orchestration: Dict[str, Any] = Field(
+        alias="orchestration",
+        validation_alias=AliasChoices("orchestration", "ir"),
+        description="Normalized orchestration package describing agents, nodes, and edges.",
+    )
     input: Any | None = None
     thread_id: str | None = Field(default=None, alias="threadId")
     options: Dict[str, Any] | None = None
 
-    model_config = {"populate_by_name": True}
+    model_config = {
+        "populate_by_name": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "orchestration": {
+                        "meta": {"id": "pkg", "name": "Demo", "version": "1.0.0"},
+                        "nodes": [],
+                        "edges": [],
+                        "entryId": "agent",
+                    },
+                    "input": "Summarize the latest release notes.",
+                    "threadId": "thread-123",
+                }
+            ]
+        },
+    }
 
 
 class ResumeRequest(BaseModel):
     """Request payload for resuming a paused run."""
 
     kind: ResumeKind
-    message: str | Dict[str, Any] | None = None
-    choice: ResumeChoice | None = None
-    metadata: Dict[str, Any] | None = None
+    message: str | Dict[str, Any] | None = Field(
+        default=None,
+        description="User-provided message when resuming with 'user_message'.",
+    )
+    choice: ResumeChoice | None = Field(
+        default=None,
+        description="Router selection when resuming a paused router node.",
+    )
+    metadata: Dict[str, Any] | None = Field(
+        default=None,
+        description="Additional metadata forwarded to the runtime for custom resumes.",
+    )
 
     @field_validator("message")
     @classmethod
@@ -59,6 +88,16 @@ class ResumeRequest(BaseModel):
         if isinstance(value, str):
             return value.strip() or value
         return value
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"kind": "continue"},
+                {"kind": "user_message", "message": "Please continue with option B."},
+                {"kind": "router_choice", "choice": {"target": "Policy Agent"}},
+            ]
+        }
+    }
 
 
 class SSEInfo(BaseModel):
@@ -87,7 +126,26 @@ class RunStatus(BaseModel):
     usage: Dict[str, Any] | None = None
     metadata: Dict[str, Any] | None = None
 
-    model_config = {"populate_by_name": True}
+    model_config = ConfigDict(
+        populate_by_name=True,
+        ser_json_exclude_none=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "runId": "run-123",
+                    "threadId": "thread-123",
+                    "status": "paused",
+                    "sse": {"url": "/v1/execute/stream?runId=run-123"},
+                    "pause": {
+                        "reason": "router.ask_user",
+                        "prompt": "Which policy should we cite?",
+                        "targets": ["Policy Agent", "Benefits Agent"],
+                    },
+                    "usage": {"input_tokens": 42, "output_tokens": 18},
+                }
+            ]
+        },
+    )
 
 
 class ErrorDetail(BaseModel):
@@ -105,6 +163,14 @@ class ErrorEnvelope(BaseModel):
     """Top-level error envelope aligning with OpenAI style."""
 
     error: ErrorDetail
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"error": {"code": "RUN_NOT_FOUND", "message": "Unknown run", "status": 404}}
+            ]
+        }
+    }
 
 
 __all__ = [
