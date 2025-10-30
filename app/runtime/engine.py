@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import time
 from collections.abc import Mapping, Sequence
@@ -12,6 +11,9 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 from app.api.deps import ExecutionContext
 from app.compiler.registry import get as get_compiled_graph
 from app.compiler.types import OrchestratorState
+from app.ir.loader import build_runtime_plan
+from app.runtime.agents.codeless import stream_codeless
+from app.runtime.context import RuntimeContext, reset_runtime_context, set_runtime_context
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streamer import TelemetryStreamer
@@ -160,12 +162,44 @@ def _resolve_metadata(
     return metadata
 
 
-def execute_once(
+def _user_message_from_input(user_input: Any) -> Dict[str, Any]:
+    content = _flatten_input(user_input)
+    if not content:
+        return {}
+    return {"role": "user", "content": content, "ts": time.time()}
+
+
+def _last_assistant_text(state: Mapping[str, Any]) -> str:
+    messages = state.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, Mapping) and message.get("role") == "assistant":
+            return _flatten_input(message.get("content"))
+    return ""
+
+
+def _agent_scratch(state: Mapping[str, Any], node_id: str) -> Dict[str, Any]:
+    scratch = state.get("scratch")
+    if not isinstance(scratch, Mapping):
+        return {}
+    agents = scratch.get("agents")
+    if not isinstance(agents, Mapping):
+        return {}
+    payload = agents.get(node_id)
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {}
+
+
+async def execute_once(
     graph_id: str,
     run_id: str,
     state_in: Mapping[str, Any] | None = None,
     *,
     metadata: Mapping[str, Any] | None = None,
+    context: ExecutionContext | None = None,
+    telemetry: TelemetryStreamer | None = None,
 ) -> OrchestratorState:
     """Invoke a compiled graph exactly once and persist the resulting state."""
 
@@ -184,7 +218,11 @@ def execute_once(
     merged_state["run_id"] = run_id
 
     config = {"configurable": {"thread_id": run_id}}
-    output_state = app.invoke(copy.deepcopy(merged_state), config=config)  # type: ignore[arg-type]
+    runtime_token = set_runtime_context(RuntimeContext(execution=context, telemetry=telemetry))
+    try:
+        output_state = await app.ainvoke(copy.deepcopy(merged_state), config=config)  # type: ignore[arg-type]
+    finally:
+        reset_runtime_context(runtime_token)
     if not isinstance(output_state, dict):
         raise RuntimeError("Compiled graph returned a non-dict state")
 
@@ -196,19 +234,28 @@ def execute_once(
     return output_state
 
 
-def resume_run(
+async def resume_run(
     graph_id: str,
     run_id: str,
     state_in: Mapping[str, Any] | None = None,
     *,
     metadata: Mapping[str, Any] | None = None,
+    context: ExecutionContext | None = None,
+    telemetry: TelemetryStreamer | None = None,
 ) -> OrchestratorState:
     """Resume a previously-started run by replaying the compiled graph."""
 
     store = get_run_state_store()
     if store.get_state(run_id) is None:
         raise ValueError(f"Run '{run_id}' not found")
-    return execute_once(graph_id, run_id, state_in, metadata=metadata)
+    return await execute_once(
+        graph_id,
+        run_id,
+        state_in,
+        metadata=metadata,
+        context=context,
+        telemetry=telemetry,
+    )
 
 
 async def run_stream(
@@ -217,59 +264,48 @@ async def run_stream(
     context: ExecutionContext,
     telemetry: Optional[TelemetryStreamer] = None,
 ) -> AsyncIterator[RunStreamEvent]:
-    """Synthesize a stream of responses events for the provided IR."""
+    """Stream Responses API-compatible events by invoking the provider."""
 
     context.ensure_run_ids()
-    run_id = context.run_id or ""
-    thread_id = context.thread_id or ""
 
-    flattened_input = _flatten_input(user_input)
-    output_text = f"Echo: {flattened_input}".strip()
-    usage = _usage(flattened_input, output_text)
+    ok, plan, errors = build_runtime_plan(ir, runtime_vars={})
+    if not ok:
+        message = "; ".join(errors) if errors else "Failed to build runtime plan"
+        raise ValueError(message)
+
+    entry_id = str(plan.get("entryId") or "")
+    node = (plan.get("nodeById") or {}).get(entry_id) or {}
+    prompt = (plan.get("agentPrompts") or {}).get(entry_id, "")
+
+    initial_state: OrchestratorState = {"messages": []}
+    user_message = _user_message_from_input(user_input)
+    if user_message:
+        initial_state["messages"] = [user_message]
 
     if telemetry and telemetry.enabled():
         await telemetry.publish(
             TelemetryEvent(
                 event="telemetry.run_started",
-                payload={"runId": run_id, "nodeCount": len(ir.get("nodes", []))},
+                payload={"runId": context.run_id, "nodeCount": len(ir.get("nodes", []))},
             )
         )
 
-    yield RunStreamEvent(
-        event="response.created",
-        data={
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "status": "in_progress",
-        },
-    )
-
-    for chunk in _chunk_output(output_text):
-        await asyncio.sleep(0)
-        yield RunStreamEvent(
-            event="response.output_text.delta",
-            data={
-                "run_id": run_id,
-                "thread_id": thread_id,
-                "delta": chunk,
-                "role": "assistant",
-            },
-        )
-
-    completed_payload = {
-        "run_id": run_id,
-        "thread_id": thread_id,
-        "output_text": output_text,
-        "usage": usage,
-        "status": "completed",
-    }
-    yield RunStreamEvent(event="response.completed", data=completed_payload)
+    token = set_runtime_context(RuntimeContext(execution=context, telemetry=telemetry))
+    try:
+        async for payload in stream_codeless(initial_state, node, prompt):
+            data = dict(payload)
+            data.setdefault("run_id", context.run_id)
+            data.setdefault("thread_id", context.thread_id)
+            event_type = str(data.get("type", payload.get("type", "message")))
+            yield RunStreamEvent(event=event_type, data=data)
+    finally:
+        reset_runtime_context(token)
 
     if telemetry and telemetry.enabled():
         await telemetry.publish(
             TelemetryEvent(
                 event="telemetry.run_completed",
-                payload={"runId": run_id, "status": "completed"},
+                payload={"runId": context.run_id, "status": "completed"},
             )
         )
 
@@ -283,18 +319,45 @@ async def run_once(
     """Execute the orchestration once and return the final output."""
 
     context.ensure_run_ids()
-    final_event: RunStreamEvent | None = None
 
-    async for event in run_stream(ir, user_input, context, telemetry):
-        if event.event == "response.completed":
-            final_event = event
+    ok, plan, errors = build_runtime_plan(ir, runtime_vars={})
+    if not ok:
+        message = "; ".join(errors) if errors else "Failed to build runtime plan"
+        raise ValueError(message)
 
-    if final_event is None:  # pragma: no cover - defensive
-        raise RuntimeError("run_stream did not emit completion event")
+    from app.compiler.builder import GraphBuilder
+    from app.compiler.registry import put as put_compiled_graph
 
-    payload = final_event.data
-    output_text = str(payload.get("output_text", ""))
-    usage = payload.get("usage", _usage(_flatten_input(user_input), output_text))
+    builder = GraphBuilder(plan)
+    app = builder.build()
+
+    graph_id = f"runtime-{context.run_id}"
+    put_compiled_graph(graph_id, app)
+
+    state_in: Dict[str, Any] = {}
+    user_message = _user_message_from_input(user_input)
+    if user_message:
+        state_in["messages"] = [user_message]
+
+    final_state = await execute_once(
+        graph_id,
+        context.run_id or "",
+        state_in,
+        metadata={"plan_entry": plan.get("entryId")},
+        context=context,
+        telemetry=telemetry,
+    )
+
+    entry_id = str(plan.get("entryId") or "")
+    scratch = _agent_scratch(final_state, entry_id)
+
+    output_text = str(scratch.get("last_output_text") or _last_assistant_text(final_state))
+    usage_payload = scratch.get("usage")
+    response_payload = scratch.get("last_response") or {}
+    if not isinstance(usage_payload, Mapping):
+        usage_payload = {}
+
+    usage = dict(usage_payload) or _usage(_flatten_input(user_input), output_text)
 
     if telemetry and telemetry.enabled():
         await telemetry.publish(
@@ -309,5 +372,5 @@ async def run_once(
         thread_id=context.thread_id or "",
         output_text=output_text,
         usage=dict(usage),
-        response=payload,
+        response=dict(response_payload) if isinstance(response_payload, Mapping) else {},
     )

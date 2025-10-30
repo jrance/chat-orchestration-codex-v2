@@ -12,8 +12,12 @@ def reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "APIGEE_TOKEN_URL",
         "APIGEE_CLIENT_ID",
         "APIGEE_CLIENT_SECRET",
+        "APIGEE_AUDIENCE",
         "OPENAI_BASE_URL",
         "HTTP_RETRY_MAX_ATTEMPTS",
+        "HTTP_MAX_RETRIES",
+        "HTTP_TIMEOUT_SECONDS",
+        "HTTP_RETRY_BACKOFF_MS",
         "HTTP_RETRY_BASE_DELAY",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -46,6 +50,18 @@ class _MockGatewayTransport(httpx.MockTransport):
                     if action != 200:
                         return httpx.Response(action, json={"error": "retry"})
                     return httpx.Response(200, json={"ok": True})
+                if action == "stream":
+                    body = (
+                        b"event: response.created\n"
+                        b"data: {\"status\":\"in_progress\"}\n\n"
+                        b"event: response.completed\n"
+                        b"data: {\"output_text\":\"hi\",\"usage\":{\"output_tokens\":1}}\n\n"
+                    )
+                    return httpx.Response(
+                        200,
+                        headers={"Content-Type": "text/event-stream"},
+                        content=body,
+                    )
                 if action == "timeout":
                     raise httpx.ReadTimeout("timeout", request=request)
                 if action == "transport":
@@ -60,6 +76,7 @@ async def test_post_responses_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     reload_settings()
 
@@ -91,8 +108,12 @@ async def test_retries_on_transient_status(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     monkeypatch.setenv("HTTP_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("HTTP_MAX_RETRIES", "3")
+    monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("HTTP_RETRY_BACKOFF_MS", "10")
     monkeypatch.setenv("HTTP_RETRY_BASE_DELAY", "0.01")
     reload_settings()
 
@@ -114,7 +135,7 @@ async def test_retries_on_transient_status(monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.anyio
 async def test_missing_base_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
     reload_settings()
 
     transport = _MockGatewayTransport()
@@ -131,6 +152,7 @@ async def test_request_uses_global_client_and_extra_headers(monkeypatch: pytest.
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     monkeypatch.setenv("APIGEE_EXTRA_HEADERS_JSON", '{"X-Static":"value"}')
     reload_settings()
@@ -149,7 +171,7 @@ async def test_request_uses_global_client_and_extra_headers(monkeypatch: pytest.
     try:
         response = await client.request(
             "POST",
-            "/responses",
+            "/v1/responses",
             json_body={"model": "test", "input": []},
             tenant_id="tenant",
             correlation_id="corr",
@@ -176,6 +198,7 @@ async def test_non_retryable_status_raises(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     reload_settings()
 
@@ -198,8 +221,12 @@ async def test_transport_error_retries_then_succeeds(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     monkeypatch.setenv("HTTP_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("HTTP_MAX_RETRIES", "3")
+    monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("HTTP_RETRY_BACKOFF_MS", "10")
     monkeypatch.setenv("HTTP_RETRY_BASE_DELAY", "0.0")
     reload_settings()
 
@@ -224,8 +251,12 @@ async def test_transport_error_exhausts_attempts(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
     monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
     monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
     monkeypatch.setenv("HTTP_RETRY_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("HTTP_MAX_RETRIES", "1")
+    monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("HTTP_RETRY_BACKOFF_MS", "0")
     monkeypatch.setenv("HTTP_RETRY_BASE_DELAY", "0.0")
     reload_settings()
 
@@ -241,3 +272,30 @@ async def test_transport_error_exhausts_attempts(monkeypatch: pytest.MonkeyPatch
             )
     finally:
         await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_post_responses_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APIGEE_TOKEN_URL", "https://gw/token")
+    monkeypatch.setenv("APIGEE_CLIENT_ID", "client")
+    monkeypatch.setenv("APIGEE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("APIGEE_AUDIENCE", "aud")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw/openai")
+    reload_settings()
+
+    transport = _MockGatewayTransport(sequence=["stream"])
+    client = OpenAICompatibleClient(transport=transport)
+    lines = []
+    try:
+        async for line in client.post_responses_stream(
+            {"model": "test", "input": []},
+            tenant_id="tenant",
+            correlation_id="corr",
+            request_id="req",
+        ):
+            lines.append(line)
+    finally:
+        await client.aclose()
+
+    assert any("response.created" in entry for entry in lines)
+    assert any("response.completed" in entry for entry in lines)

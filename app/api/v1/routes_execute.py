@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
 from app.config.settings import settings
+from app.ir.loader import build_runtime_plan
 from app.runtime.engine import ExecutionResult, RunStreamEvent, run_once, run_stream
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.sse.streams import SSEMessage, message_stream
@@ -98,7 +99,11 @@ async def _persist_run_state(result: ExecutionResult) -> None:
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute(request: Request, req: ExecuteRequest) -> ExecuteResponse:
     context, telemetry = await _create_context(request, req)
-    result = await run_once(req.ir, req.input, context, telemetry)
+    try:
+        result = await run_once(req.ir, req.input, context, telemetry)
+    except ValueError as exc:
+        await _finalize_telemetry(context, telemetry)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await _persist_run_state(result)
     await _finalize_telemetry(context, telemetry)
 
@@ -140,6 +145,12 @@ async def _stream_response_events(
 @router.post("/execute/stream")
 async def execute_stream(request: Request, req: ExecuteRequest) -> StreamingResponse:
     context, telemetry = await _create_context(request, req)
+
+    ok, _, errors = build_runtime_plan(req.ir, runtime_vars={})
+    if not ok:
+        await _finalize_telemetry(context, telemetry)
+        message = "; ".join(errors) if errors else "Invalid orchestration package"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
 
     headers: Dict[str, str] = {
         "Cache-Control": "no-cache",

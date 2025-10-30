@@ -26,11 +26,15 @@ class Settings(BaseSettings):
     apigee_token_url: str | None = None
     apigee_client_id: str | None = None
     apigee_client_secret: str | None = None
+    apigee_audience: str | None = None
     apigee_scopes: str = "openid"
-    openai_base_url: str | None = None
+    openai_base_url: str = "http://localhost:8000"
     apigee_extra_headers_json: str | None = None
 
     # HTTP client tuning
+    http_timeout_seconds: float = 30.0
+    http_max_retries: int = 2
+    http_retry_backoff_ms: int = 250
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 60.0
@@ -51,6 +55,20 @@ class Settings(BaseSettings):
     run_store_kind: str = "memory"
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+
+    def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
+        """Backfill legacy HTTP tuning defaults when new knobs are provided."""
+        fields_set = getattr(self, "model_fields_set", set())
+        if "http_connect_timeout" not in fields_set:
+            self.http_connect_timeout = float(self.http_timeout_seconds)
+        if "http_read_timeout" not in fields_set:
+            self.http_read_timeout = float(self.http_timeout_seconds)
+        if "http_write_timeout" not in fields_set:
+            self.http_write_timeout = float(self.http_timeout_seconds)
+        if "http_retry_max_attempts" not in fields_set:
+            self.http_retry_max_attempts = int(self.http_max_retries)
+        if "http_retry_base_delay" not in fields_set:
+            self.http_retry_base_delay = float(self.http_retry_backoff_ms) / 1000.0
 
     def apigee_extra_headers(self) -> dict[str, Any]:
         """Return configured static headers to include with every Apigee call."""

@@ -1,4 +1,4 @@
-import asyncio
+import copy
 import json
 from urllib.parse import parse_qs, urlparse
 
@@ -6,18 +6,61 @@ import pytest
 from httpx import AsyncClient
 
 from app.telemetry.models import TelemetryLevel
+from app.runtime.agents import codeless as codeless_mod
+from app.runtime.agents.codeless import LLMResult
 
 
 def _sample_ir(tenant: str = "tenant-1") -> dict:
     return {
         "meta": {"id": "pkg-1", "name": "Test", "version": "1.0.0", "tenantId": tenant},
-        "nodes": [],
+        "nodes": [
+            {
+                "id": "agent",
+                "kind": "agent.codeless",
+                "label": "Agent",
+                "data": {
+                    "systemInstructions": "Respond cheerfully.",
+                    "model": {"provider": "openai", "modelId": "gpt-4o", "temperature": 0.1, "topP": 1, "maxTokens": 64, "stop": []},
+                    "context": {"historyWindow": {"mode": "LastN", "n": 5}},
+                    "tools": {"policy": "Disabled", "attached": []},
+                },
+            }
+        ],
         "edges": [],
+        "entryId": "agent",
     }
 
 
 def _assert_event(sequence: list[str], event_name: str) -> bool:
     return any(f"event: {event_name}" in chunk for chunk in sequence)
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm(monkeypatch: pytest.MonkeyPatch):
+    async def _invoke_stub(state, agent_node, prompt):
+        new_state = copy.deepcopy(state)
+        messages = list(new_state.get("messages") or [])
+        messages.append({"role": "assistant", "content": "stub response"})
+        new_state["messages"] = messages
+        return LLMResult(
+            state=new_state,
+            response={"output_text": "stub response"},
+            output_text="stub response",
+            usage={"output_tokens": 3},
+        )
+
+    async def _stream_stub(state, agent_node, prompt):
+        yield {"type": "response.created", "status": "in_progress"}
+        yield {"type": "response.output_text.delta", "delta": "stub "}
+        yield {
+            "type": "response.completed",
+            "output_text": "stub response",
+            "usage": {"output_tokens": 3},
+        }
+
+    monkeypatch.setattr(codeless_mod, "invoke_llm", _invoke_stub)
+    monkeypatch.setattr("app.runtime.engine.stream_codeless", _stream_stub)
+    yield
 
 
 @pytest.mark.anyio
@@ -40,8 +83,8 @@ async def test_execute_returns_result(async_client: AsyncClient):
     assert response.status_code == 200
     assert data["ok"] is True
     assert data["runId"]
-    assert data["output_text"].startswith("Echo:")
-    assert data["usage"]["output_tokens"] >= 1
+    assert data["output_text"] == "stub response"
+    assert data["usage"]["output_tokens"] == 2
 
 
 @pytest.mark.anyio

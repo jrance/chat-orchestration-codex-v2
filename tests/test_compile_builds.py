@@ -83,13 +83,13 @@ def pkg_unknown_passthrough():
 
 
 @pytest.mark.anyio
-async def test_graph_compiles_and_routes():
+async def test_graph_compiles_and_routes(stub_llm):
     ok, plan, errs = build_runtime_plan(pkg_router_flow(), {})
     assert ok, errs
 
     builder = GraphBuilder(plan)
     app = builder.build()
-    state = app.invoke({"messages": [], "scratch": {}})
+    state = await app.ainvoke({"messages": [], "scratch": {}})
 
     assert state["route"]["target"] == "seq"
     assistant_msgs = [m for m in state.get("messages", []) if m.get("role") == "assistant"]

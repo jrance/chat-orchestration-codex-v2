@@ -21,6 +21,8 @@ We then **replace the stub behavior** in the `agent.codeless` node with a real L
 >
 > These behaviors align with the official docs and changelog notes.
 
+The orchestration schema can be found at schemas\orchestration_ir.schema.json and examples of valid orchestration packages can be found in schemas\examples. Use the examples to ensure that the LangGraph app compiles correctly.
+
 ## Purpose
 - Provide a hardened, reusable HTTP client for our LLM calls with **Apigee OAuth + headers**.
 - Deliver **real** LLM responses for the codeless agent (both sync and streaming).

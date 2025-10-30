@@ -1,83 +1,108 @@
-# Execute & Telemetry APIs
+# Execute API
 
-The orchestration runtime exposes synchronous and streaming execution APIs that follow the OpenAI Responses event format. Every request must include the headers below (defaults are applied where noted).
+The Execute API compiles orchestration packages into LangGraph applications and runs them with either a synchronous JSON response or an OpenAI Responses-compatible event stream.
 
-## Required Headers
+## Headers
 
-| Header | Description |
-| --- | --- |
-| `X-Tenant-Id` | Tenant that owns the orchestration package. Must match `meta.tenantId` when present. |
-| `X-Correlation-Id` | Optional correlation identifier. Generated when omitted. |
-| `X-Request-Id` | Optional request identifier. Generated when omitted. |
-| `X-Timestamp` | RFC3339 timestamp. Generated when omitted. |
-| `X-Telemetry` | `none` (default), `basic`, or `verbose`. Controls telemetry streaming. |
+All endpoints require the following headers:
+
+- `X-Tenant-Id` *(required)* – Tenant identifier; must match `meta.tenantId` in the IR when present.
+- `X-Correlation-Id`, `X-Request-Id` *(optional)* – Request tracing identifiers; generated when omitted.
+- `X-Timestamp` *(optional)* – RFC3339 timestamp; defaults to current UTC time.
+- `X-Client-Id` *(optional)* – Downstream client identifier.
+- `X-Telemetry` *(optional)* – `none` (default), `basic`, or `verbose`. Enables telemetry streaming when not `none`.
+
+Additional headers prefixed with `X-Extra-` are forwarded to downstream HTTP calls.
 
 ## POST /v1/execute
 
-Executes the orchestration once and returns the final response.
+Runs the orchestration synchronously and returns a JSON body once completed.
 
-```bash
-curl -s -X POST http://localhost:8000/v1/execute \
-  -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: tenant-123" \
-  -d '{
-        "ir": {"meta": {"id": "pkg", "name": "Demo", "version": "1.0.0", "tenantId": "tenant-123"}, "nodes": [], "edges": []},
-        "input": "Hello runtime"
-      }'
+```jsonc
+{
+  "ir": { /* orchestration package */ },
+  "input": "hello world",
+  "options": {
+    "timeout": 30
+  }
+}
 ```
 
-Sample response:
+Successful response:
 
 ```json
 {
   "ok": true,
-  "runId": "e9b0f5af9f7f4c7b8a7498bf8df49839",
-  "threadId": "thread-e9b0f5af9f7f4c7b8a7498bf8df49839",
-  "output_text": "Echo: Hello runtime",
-  "usage": {
-    "input_tokens": 2,
-    "output_tokens": 3
-  },
+  "runId": "run_123",
+  "threadId": "thread_run_123",
+  "output_text": "stub response",
+  "usage": {"output_tokens": 2},
   "message": "completed"
 }
 ```
 
-## POST /v1/execute/stream
+Errors return a 4xx/5xx JSON payload of the form:
 
-Streams OpenAI Responses-compatible SSE events (`response.created`, `response.output_text.delta`, `response.completed`).
-
-```bash
-curl -N -s -X POST http://localhost:8000/v1/execute/stream \
-  -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: tenant-123" \
-  -H "X-Telemetry: basic" \
-  -d '{
-        "ir": {"meta": {"id": "pkg", "name": "Demo", "version": "1.0.0", "tenantId": "tenant-123"}, "nodes": [], "edges": []},
-        "input": "Stream this"
-      }'
+```json
+{"detail": "Tenant mismatch: header 'tenant-1' does not match IR meta 'tenant-2'"}
 ```
 
-When telemetry is enabled the response includes `X-Telemetry-Stream-Url`, allowing clients to subscribe to `/v1/telemetry/stream?runId=<id>`.
+## POST /v1/execute/stream
+
+Streams OpenAI Responses API-compatible events via Server-Sent Events. The initial request body matches `/v1/execute`.
+
+The response has `Content-Type: text/event-stream` and emits events such as:
+
+```
+event: response.created
+data: {"run_id":"run_123","status":"in_progress"}
+
+event: response.output_text.delta
+data: {"delta":"stub ","role":"assistant"}
+
+event: response.completed
+data: {"run_id":"run_123","output_text":"stub response","usage":{"output_tokens":2}}
+```
+
+When telemetry is enabled (`X-Telemetry` header set to `basic`/`verbose`), the response also includes:
+
+```
+X-Telemetry-Stream-Url: /v1/telemetry/stream?runId=run_123
+```
 
 ## POST /v1/execute/{runId}/resume
 
-Resumes a checkpointed run. The mock runtime replays the previously persisted output and appends any new instructions provided during resume.
+Returns the latest persisted result for a run. This is a synchronous endpoint used to hydrate UI clients before full resume support is available.
 
-```bash
-curl -s -X POST http://localhost:8000/v1/execute/<runId>/resume \
-  -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: tenant-123" \
-  -d '{"input": "Additional instructions"}'
+```
+POST /v1/execute/run_123/resume
+{
+  "input": "additional context"
+}
 ```
 
 ## GET /v1/telemetry/stream
 
-Streams telemetry events for a given run. Requires `X-Tenant-Id` and an optional `X-Telemetry` header.
+Streams telemetry events (e.g., `telemetry.llm.request`, `telemetry.llm.response`) for a run when telemetry is enabled. Consumers should connect using the URL returned in `X-Telemetry-Stream-Url`.
 
-```bash
-curl -N -s "http://localhost:8000/v1/telemetry/stream?runId=<runId>" \
-  -H "X-Tenant-Id: tenant-123" \
-  -H "X-Telemetry: basic"
+```
+event: telemetry.llm.request
+data: {"runId":"run_123","model":"gpt-4o","stream":true}
 ```
 
-Telemetry frames are delivered as SSE events named `telemetry.*` and contain JSON payloads suitable for dashboards or logging sinks.
+## Examples
+
+```bash
+curl -X POST http://localhost:8000/v1/execute \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: tenant-1" \
+  -d @orchestration.json
+
+curl -N -X POST http://localhost:8000/v1/execute/stream \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: tenant-1" \
+  -H "X-Telemetry: basic" \
+  -d @orchestration.json
+```
+
+The streaming endpoint can be consumed with any SSE client and is compatible with OpenAI ChatKit token streaming.

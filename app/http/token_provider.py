@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from typing import Optional, cast
 
 import httpx
@@ -45,52 +46,60 @@ class ApigeeTokenProvider:
     def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
         self._cache = TokenCache()
         self._transport = transport
+        self._lock = asyncio.Lock()
 
     async def get_token(self, force_refresh: bool = False) -> str:
         """Return a cached bearer token, refreshing when necessary."""
         if not force_refresh and self._cache.is_valid():
             return cast(str, self._cache.access_token)
 
-        token_url = settings.apigee_token_url
-        client_id = settings.apigee_client_id
-        client_secret = settings.apigee_client_secret
+        async with self._lock:
+            if not force_refresh and self._cache.is_valid():
+                return cast(str, self._cache.access_token)
 
-        if not token_url or not client_id or not client_secret:
-            raise RuntimeError(
-                "Apigee token configuration missing (APIGEE_TOKEN_URL/CLIENT_ID/CLIENT_SECRET).",
-            )
+            token_url = settings.apigee_token_url
+            client_id = settings.apigee_client_id
+            client_secret = settings.apigee_client_secret
 
-        form_data: dict[str, str] = {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-        scopes = (settings.apigee_scopes or "").strip()
-        if scopes:
-            form_data["scope"] = scopes
+            if not token_url or not client_id or not client_secret:
+                raise RuntimeError(
+                    "Apigee token configuration missing (APIGEE_TOKEN_URL/CLIENT_ID/CLIENT_SECRET).",
+                )
 
-        timeout = httpx.Timeout(15.0)
-        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-            response = await client.post(
-                token_url,
-                data=form_data,
-                headers={"Accept": "application/json"},
-            )
-        response.raise_for_status()
-        payload = response.json()
+            form_data: dict[str, str] = {
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }
+            scopes = (settings.apigee_scopes or "").strip()
+            if scopes:
+                form_data["scope"] = scopes
+            audience = (settings.apigee_audience or "").strip()
+            if audience:
+                form_data["audience"] = audience
 
-        token = payload.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise RuntimeError("Apigee token endpoint returned an invalid payload (missing access_token).")
+            timeout = httpx.Timeout(15.0)
+            async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
+                response = await client.post(
+                    token_url,
+                    data=form_data,
+                    headers={"Accept": "application/json"},
+                )
+            response.raise_for_status()
+            payload = response.json()
 
-        expires_in_raw = payload.get("expires_in", TOKEN_DEFAULT_EXPIRY)
-        try:
-            expires_in = int(expires_in_raw)
-        except (TypeError, ValueError):
-            expires_in = TOKEN_DEFAULT_EXPIRY
+            token = payload.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("Apigee token endpoint returned an invalid payload (missing access_token).")
 
-        self._cache.set(token, expires_in)
-        return token
+            expires_in_raw = payload.get("expires_in", TOKEN_DEFAULT_EXPIRY)
+            try:
+                expires_in = int(expires_in_raw)
+            except (TypeError, ValueError):
+                expires_in = TOKEN_DEFAULT_EXPIRY
+
+            self._cache.set(token, expires_in)
+            return token
 
     def clear_cache(self) -> None:
         """Clear the cached token (primarily for testing)."""

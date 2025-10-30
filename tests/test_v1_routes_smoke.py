@@ -64,8 +64,33 @@ async def test_compile_success(async_client: AsyncClient):
 
 
 @pytest.mark.anyio
-async def test_execute_endpoint(async_client: AsyncClient):
-    body = {"ir": PKG, "input": "hello"}
+async def test_execute_endpoint(async_client: AsyncClient, stub_llm):
+    ir = {
+        "meta": {"id": "exec", "name": "exec", "version": "1.0.0"},
+        "nodes": [
+            {
+                "id": "agent",
+                "kind": "agent.codeless",
+                "label": "Agent",
+                "data": {
+                    "systemInstructions": "Say hello",
+                    "model": {
+                        "provider": "openai",
+                        "modelId": "gpt-4o",
+                        "temperature": 0.1,
+                        "topP": 1,
+                        "maxTokens": 32,
+                        "stop": [],
+                    },
+                    "context": {"historyWindow": {"mode": "LastN", "n": 2}},
+                    "tools": {"policy": "Disabled", "attached": []},
+                },
+            }
+        ],
+        "edges": [],
+        "entryId": "agent",
+    }
+    body = {"ir": ir, "input": "hello"}
     response = await async_client.post(
         "/v1/execute",
         json=body,
