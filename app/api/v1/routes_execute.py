@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 
 from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
 from app.api.models import TelemetryLevel
@@ -162,6 +162,12 @@ async def _stream_response_events(
         await _persist_run_state(result)
 
     await _finalize_telemetry(context, telemetry, remove=False)
+
+
+@router.options("/execute/stream", tags=["execute"])
+async def options_execute_stream() -> Response:
+    """Handle CORS preflight requests for the streaming endpoint."""
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/execute/stream", tags=["execute"])

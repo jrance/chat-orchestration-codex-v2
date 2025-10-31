@@ -2,14 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "FastAPI (uvicorn)",
+      "name": "FastAPI (Uvicorn)",
       "type": "python",
       "request": "launch",
       "module": "uvicorn",
       "args": ["app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload"],
-      "jinja": true,
+      "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/.env",
-      "console": "integratedTerminal"
+      "console": "integratedTerminal",
+      "jinja": true,
+      "justMyCode": true,
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
     }
   ]
 }

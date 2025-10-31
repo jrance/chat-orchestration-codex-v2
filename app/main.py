@@ -1,6 +1,7 @@
 """FastAPI application factory and entrypoint."""
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routes_compile import router as compile_router
 from app.api.v1.routes_execute import router as execute_router
@@ -24,6 +25,18 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url=None,
     )
+
+    # Add CORS middleware (PR-015)
+    if settings.cors_enabled:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_allow_origins,
+            allow_credentials=settings.cors_allow_credentials,
+            allow_methods=settings.cors_allow_methods,
+            allow_headers=settings.cors_allow_headers,
+            expose_headers=settings.cors_expose_headers,
+            max_age=86400,  # cache preflight for 24h
+        )
 
     app.add_middleware(RequestIdMiddleware)
 

@@ -59,6 +59,26 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     redis_emulator: bool = False
 
+    # CORS configuration (PR-015)
+    cors_enabled: bool = True
+    cors_allow_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8080",
+    ]
+    cors_allow_credentials: bool = True
+    cors_allow_methods: list[str] = ["*"]
+    cors_allow_headers: list[str] = ["*"]
+    cors_expose_headers: list[str] = [
+        "X-Run-Id",
+        "X-Request-Id",
+        "X-Correlation-Id",
+        "Content-Type",
+        "Cache-Control",
+    ]
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
