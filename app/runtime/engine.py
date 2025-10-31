@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -14,13 +15,20 @@ from app.api.models import ExecutionHeaders
 from app.compiler.registry import get as get_compiled_graph
 from app.compiler.types import OrchestratorState
 from app.ir.loader import build_runtime_plan
+from app.runtime.agents import codeless as codeless_mod
 from app.runtime.agents.codeless import stream_codeless
-from app.runtime.context import RuntimeContext, reset_runtime_context, set_runtime_context
+from app.runtime.context import (
+    RuntimeContext,
+    get_runtime_context,
+    reset_runtime_context,
+    set_runtime_context,
+)
 from app.runtime.patterns.concurrent import build_concurrent_runner
 from app.runtime.patterns.groupchat import build_groupchat_runner
 from app.runtime.state import Checkpoint, RunStatus, get_checkpointer
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
+from app.telemetry.streams import alias_event_types, canonical_event_type, response_event
 from app.telemetry.streamer import TelemetryStreamer
 
 
@@ -697,6 +705,12 @@ async def run_stream(
                         "thread_id": context.thread_id,
                     },
                 )
+                done_payload = response_event(
+                    "response.output_text.done",
+                    run_id=context.run_id,
+                    thread_id=context.thread_id,
+                )
+                yield RunStreamEvent(event=done_payload["type"], data=done_payload)
             completed_payload = {
                 "type": "response.completed",
                 "run_id": context.run_id,
@@ -757,6 +771,12 @@ async def run_stream(
                         "thread_id": context.thread_id,
                     },
                 )
+                done_payload = response_event(
+                    "response.output_text.done",
+                    run_id=context.run_id,
+                    thread_id=context.thread_id,
+                )
+                yield RunStreamEvent(event=done_payload["type"], data=done_payload)
             metadata_groupchat: dict[str, Any] = {}
             if isinstance(groupchat_payload, Mapping):
                 metadata_groupchat = {
@@ -781,6 +801,16 @@ async def run_stream(
             }
             yield RunStreamEvent(event="response.completed", data=completed_payload)
         else:
+            tool_runtime = codeless_mod._prepare_tool_runtime(
+                node,
+                attached_tools,
+                mcp_servers,
+            )
+            runtime_ctx = get_runtime_context()
+            tool_calls_executed = 0
+            pending_call_arguments: Dict[str, Dict[str, Any]] = {}
+            output_delta_seen = False
+            output_done_emitted = False
             async for payload in stream_codeless(
                 initial_state,
                 node,
@@ -788,11 +818,124 @@ async def run_stream(
                 attached_tools=attached_tools,
                 mcp_servers=mcp_servers,
             ):
+                raw_type = str(payload.get("type") or payload.get("event") or "message")
+                canonical_type = canonical_event_type(raw_type)
                 data = dict(payload)
-                data.setdefault("run_id", context.run_id)
-                data.setdefault("thread_id", context.thread_id)
-                event_type = str(data.get("type", payload.get("type", "message")))
-                yield RunStreamEvent(event=event_type, data=data)
+                data["type"] = canonical_type
+                data.setdefault("run_id", context.run_id or "")
+                data.setdefault("thread_id", context.thread_id or "")
+
+                if canonical_type == "response.output_text.delta":
+                    output_delta_seen = True
+                elif canonical_type == "response.output_text.done":
+                    output_done_emitted = True
+
+                events_to_emit: List[Dict[str, Any]] = []
+                trailing_events: List[Dict[str, Any]] = []
+
+                if canonical_type in {
+                    "response.function_call_arguments.delta",
+                    "response.function_call_arguments.done",
+                }:
+                    call_identifier = str(
+                        data.get("tool_call_id")
+                        or data.get("call_id")
+                        or data.get("id")
+                        or ""
+                    )
+                    call_name = str(data.get("name") or data.get("tool_name") or "")
+                    pending_key = call_identifier or call_name or "__anonymous__"
+                    entry = pending_call_arguments.setdefault(
+                        pending_key,
+                        {"name": call_name, "chunks": [], "last_payload": data, "key": pending_key},
+                    )
+                    entry["name"] = call_name or entry.get("name") or ""
+                    entry["last_payload"] = data
+                    if canonical_type == "response.function_call_arguments.delta":
+                        arguments_chunk = data.get("arguments")
+                        if isinstance(arguments_chunk, str):
+                            entry["chunks"].append(arguments_chunk)
+                        elif isinstance(arguments_chunk, Mapping):
+                            entry["chunks"].append(json.dumps(arguments_chunk))
+                    else:
+                        stored_entry = pending_call_arguments.pop(
+                            entry.get("key", pending_key),
+                            entry,
+                        )
+                        entry = stored_entry or entry
+                        arguments_text = "".join(entry.get("chunks", []))
+                        if not arguments_text and isinstance(data.get("arguments"), str):
+                            arguments_text = data["arguments"]
+                        tool_arguments = codeless_mod._parse_tool_arguments(
+                            arguments_text if arguments_text else data.get("arguments")
+                        )
+                        tool_call_id = call_identifier or entry["name"] or uuid.uuid4().hex
+                        tool_call = {
+                            "id": tool_call_id,
+                            "name": entry.get("name") or call_name or "",
+                            "arguments": tool_arguments,
+                        }
+                        created_payload = response_event(
+                            "response.tool_result.created",
+                            run_id=context.run_id or "",
+                            thread_id=context.thread_id or "",
+                            data={
+                                "tool_call_id": tool_call_id,
+                                "name": tool_call["name"],
+                            },
+                        )
+                        trailing_events.append(created_payload)
+                        tool_result: Dict[str, Any] | None = None
+                        if tool_runtime.enabled:
+                            if tool_runtime.max_calls is None or tool_calls_executed < tool_runtime.max_calls:
+                                tool_result = await codeless_mod._execute_tool_call(
+                                    tool_call, tool_runtime, runtime_ctx.telemetry if runtime_ctx else None
+                                )
+                                tool_calls_executed += 1
+                        if tool_result is None:
+                            tool_result = {
+                                "id": tool_call["id"],
+                                "name": tool_call["name"],
+                                "output": {},
+                            }
+                        result_payload: Dict[str, Any] = {
+                            "tool_call_id": tool_call_id,
+                            "name": tool_call["name"],
+                        }
+                        if not tool_runtime.redact:
+                            result_payload["output"] = tool_result.get("output")
+                        done_payload = response_event(
+                            "response.tool_result.done",
+                            run_id=context.run_id or "",
+                            thread_id=context.thread_id or "",
+                            data=result_payload,
+                        )
+                        trailing_events.append(done_payload)
+
+                if (
+                    canonical_type == "response.completed"
+                    and output_delta_seen
+                    and not output_done_emitted
+                ):
+                    done_payload = response_event(
+                        "response.output_text.done",
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                    )
+                    events_to_emit.append(done_payload)
+                    output_done_emitted = True
+
+                events_to_emit.append(data)
+
+                for alias_type in alias_event_types(canonical_type):
+                    alias_payload = dict(data)
+                    alias_payload["type"] = alias_type
+                    events_to_emit.append(alias_payload)
+
+                events_to_emit.extend(trailing_events)
+
+                for item in events_to_emit:
+                    yield RunStreamEvent(event=item["type"], data=item)
     finally:
         reset_runtime_context(token)
 

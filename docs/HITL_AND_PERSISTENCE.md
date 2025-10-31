@@ -37,6 +37,13 @@ curl -X POST "https://host/v1/execute/$RUN_ID/resume" \
 
 The runtime saves a checkpoint after every node execution. During resume, the checkpoint is mutated with the resume payload and replayed to completion, emitting new telemetry (`telemetry.resume.start` / `.completed`).
 
+> **Environment precedence:** For backward compatibility, the factory resolves the checkpointer kind in this order:
+> 1) `CHECKPOINTER_KIND` (legacy env override).
+> 2) `settings.CHECKPOINTER_BACKEND` (configuration default such as `"memory"`).
+> Unknown values raise `ValueError`. CI can force the Redis stub by setting `CHECKPOINTER_KIND=redis` with `REDIS_URL=fakeredis://` and `REDIS_EMULATOR=true`.
+
 ## SSE & Status
 
 Every response includes an `sse.url` so clients can resume streaming (`/v1/execute/stream?runId=...`). `RunStatus.pause` surfaces HITL metadata when paused, and is cleared automatically after a successful resume.
+
+- Tool lifecycle events (`response.tool_result.created` / `response.tool_result.done`) now appear on the main SSE stream immediately around runtime tool execution. Detailed payloads remain available via the telemetry stream when `X-Telemetry: verbose` is enabled.

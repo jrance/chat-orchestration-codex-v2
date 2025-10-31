@@ -11,7 +11,9 @@
 - [ ] `uv run pytest -q --cov=app --cov-report=term-missing` → **All tests pass**, coverage ≥ **80%** overall and on new modules.
 - [ ] `uv run python -c "import json,sys; print('OK')"` → sanity check environment.
 - [ ] `uv run uvicorn app.main:app --reload` → **/docs** and **/openapi.json** are reachable without errors.
+  - Launch in a new shell, visit `http://127.0.0.1:8000/docs` and `http://127.0.0.1:8000/openapi.json`, then Ctrl+C to stop the server.
 - [ ] No **uncommitted changes** after running tests (`git status` clean).
+  - Quick clean-up: `git status -sb` → if files should land, `git add <paths> && git commit`; otherwise `git checkout -- <paths>` (or `git restore`).
 
 ---
 

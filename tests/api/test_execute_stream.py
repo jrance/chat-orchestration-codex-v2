@@ -84,6 +84,9 @@ async def test_execute_returns_result(async_client: AsyncClient):
     assert data["runId"]
     assert data["status"] in {"running", "completed"}
     assert data["sse"]["url"].endswith(data["runId"])
+    # NOTE: Only `response.output_text.delta` chunks contribute to `output_tokens`.
+    # The sentinel `response.output_text.done` event finalizes the stream without
+    # incrementing usage to stay aligned with the Responses API accounting.
     assert data.get("usage", {}).get("output_tokens") == 2
 
 
@@ -101,6 +104,7 @@ async def test_stream_emits_response_events(async_client: AsyncClient):
 
     assert _assert_event(frames, "response.created")
     assert _assert_event(frames, "response.output_text.delta")
+    assert _assert_event(frames, "response.output_text.done")
     assert _assert_event(frames, "response.completed")
 
 
@@ -131,6 +135,7 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
 
     payload = (await response.aread()).decode()
     frames = [frame for frame in payload.split("\n\n") if frame.strip()]
+    assert _assert_event(frames, "response.output_text.done")
     assert _assert_event(frames, "response.completed")
 
     run_id = parse_qs(urlparse(telemetry_header).query).get("runId", [""])[0]
@@ -141,5 +146,69 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
     telemetry_payload = (await telemetry_response.aread()).decode()
     assert "event: telemetry.run_started" in telemetry_payload
     assert "event: telemetry.run_completed" in telemetry_payload
+
+
+@pytest.mark.anyio
+async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, async_client: AsyncClient):
+    from app.runtime import engine as engine_mod
+
+    tool_runtime = codeless_mod.ToolRuntime(
+        specs={},
+        payload=[],
+        policy="Enabled",
+        max_calls=None,
+        timeout_ms=None,
+        parallelism=1,
+        redact=False,
+        enabled=True,
+        mcp_servers={},
+    )
+
+    monkeypatch.setattr(engine_mod.codeless_mod, "_prepare_tool_runtime", lambda *args, **kwargs: tool_runtime)
+
+    async def _fake_execute(call, runtime, telemetry):
+        return {"id": call.get("id"), "name": call.get("name"), "output": {"echo": call.get("arguments")}}
+
+    monkeypatch.setattr(engine_mod.codeless_mod, "_execute_tool_call", _fake_execute)
+
+    async def _fake_stream(state, agent_node, prompt, **_kwargs):
+        yield {"type": "response.created"}
+        yield {
+            "type": "response.function_call_arguments.delta",
+            "id": "call-1",
+            "name": "echo",
+            "arguments": '{"text":"hi"}',
+        }
+        yield {
+            "type": "response.function_call_arguments.done",
+            "id": "call-1",
+            "name": "echo",
+        }
+        yield {"type": "response.completed", "output_text": "", "usage": {"output_tokens": 1}}
+
+    monkeypatch.setattr(engine_mod, "stream_codeless", _fake_stream)
+
+    body = {"orchestration": _sample_ir(), "input": "invoke tool"}
+    response = await async_client.post(
+        "/v1/execute/stream",
+        json=body,
+        headers={"X-Tenant-Id": "tenant-1"},
+    )
+
+    payload = (await response.aread()).decode()
+    frames = [frame for frame in payload.split("\n\n") if frame.strip()]
+
+    def _index(event_name: str) -> int:
+        for idx, frame in enumerate(frames):
+            if f"event: {event_name}" in frame:
+                return idx
+        raise AssertionError(f"{event_name} not found in stream: {frames}")
+
+    created_idx = _index("response.tool_result.created")
+    done_idx = _index("response.tool_result.done")
+    completed_idx = _index("response.completed")
+
+    assert created_idx < done_idx < completed_idx
+    assert '"output":' in frames[done_idx]
 
 
