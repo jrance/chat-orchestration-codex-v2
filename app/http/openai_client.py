@@ -167,13 +167,48 @@ def _extract_text_from_content(content: Any) -> str:
     return ""
 
 
-def _chat_response_to_responses(payload: Any) -> dict[str, Any]:
+def _map_tool_name(name: str, reverse: Mapping[str, str] | None) -> str:
+    if not name:
+        return ""
+    if reverse:
+        return str(reverse.get(name, name))
+    return str(name)
+
+
+def _normalize_chat_tool_call(entry: Mapping[str, Any], reverse: Mapping[str, str] | None) -> dict[str, Any] | None:
+    if not isinstance(entry, Mapping):
+        return None
+    function_block = entry.get("function")
+    if not isinstance(function_block, Mapping):
+        return None
+    raw_name = str(function_block.get("name") or "")
+    mapped_name = _map_tool_name(raw_name, reverse)
+    arguments = function_block.get("arguments")
+    serialized_args: Any
+    if isinstance(arguments, str):
+        serialized_args = arguments
+    elif isinstance(arguments, Mapping):
+        serialized_args = json.dumps(arguments)
+    elif arguments is None:
+        serialized_args = None
+    else:
+        serialized_args = json.dumps(arguments)
+    normalized: dict[str, Any] = {
+        "id": str(entry.get("id") or mapped_name or ""),
+        "name": mapped_name,
+    }
+    if serialized_args is not None:
+        normalized["arguments"] = serialized_args
+    return normalized
+
+
+def _chat_response_to_responses(payload: Any, tool_name_map: Mapping[str, str] | None = None) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         return {"output_text": "", "raw": payload}
 
     choices = payload.get("choices")
     text_segments: list[str] = []
-    tool_calls: list[Any] = []
+    tool_calls: list[dict[str, Any]] = []
     if isinstance(choices, Sequence):
         for choice in choices:
             if not isinstance(choice, Mapping):
@@ -185,7 +220,10 @@ def _chat_response_to_responses(payload: Any) -> dict[str, Any]:
                     text_segments.append(text)
                 tool_data = message.get("tool_calls")
                 if isinstance(tool_data, Sequence):
-                    tool_calls.extend(tool_data)
+                    for entry in tool_data:
+                        normalized = _normalize_chat_tool_call(entry, tool_name_map)
+                        if normalized:
+                            tool_calls.append(normalized)
             delta = choice.get("delta")
             if isinstance(delta, Mapping):
                 text = _extract_text_from_content(delta.get("content"))
@@ -193,7 +231,10 @@ def _chat_response_to_responses(payload: Any) -> dict[str, Any]:
                     text_segments.append(text)
                 tool_data = delta.get("tool_calls")
                 if isinstance(tool_data, Sequence):
-                    tool_calls.extend(tool_data)
+                    for entry in tool_data:
+                        normalized = _normalize_chat_tool_call(entry, tool_name_map)
+                        if normalized:
+                            tool_calls.append(normalized)
 
     usage_block = payload.get("usage")
     normalized: dict[str, Any] = {
@@ -218,7 +259,10 @@ def _chat_response_to_responses(payload: Any) -> dict[str, Any]:
     return normalized
 
 
-async def _chat_stream_as_responses(response: httpx.Response) -> AsyncIterator[str]:
+async def _chat_stream_as_responses(
+    response: httpx.Response,
+    tool_name_map: Mapping[str, str] | None = None,
+) -> AsyncIterator[str]:
     yield "event: response.created"
     yield 'data: {"status":"in_progress"}'
     yield ""
@@ -279,12 +323,14 @@ async def _chat_stream_as_responses(response: httpx.Response) -> AsyncIterator[s
                             if not isinstance(function_block, Mapping):
                                 continue
                             name = str(function_block.get("name") or "")
+                            mapped_name = _map_tool_name(name, tool_name_map)
                             arguments = function_block.get("arguments")
+                            state_key = tool_id or mapped_name or f"tool_{len(tool_states)+1}"
                             state = tool_states.setdefault(
-                                tool_id or name or f"tool_{len(tool_states)+1}",
-                                {"name": name, "chunks": [], "id": tool_id or None},
+                                state_key,
+                                {"name": mapped_name, "chunks": [], "id": tool_id or None},
                             )
-                            state["name"] = name or state["name"]
+                            state["name"] = mapped_name or state["name"]
                             if isinstance(arguments, str):
                                 state["chunks"].append(arguments)
                                 payload_obj = {
@@ -476,17 +522,19 @@ class OpenAICompatibleClient:
         """Convenience helper for POST /responses."""
         style = _configured_style()
         payload = _build_payload(body, style=style)
+        tool_reverse = payload.pop("_tool_name_reverse_map", None)
         path = _endpoint_for_style(style)
         try:
             response = await self.request("POST", path, json_body=payload, **headers)
             data = response.json()
-            return data if style == _RESPONSES_STYLE else _chat_response_to_responses(data)
+            return data if style == _RESPONSES_STYLE else _chat_response_to_responses(data, tool_reverse)
         except httpx.HTTPStatusError as exc:
             message = _extract_error_message(exc.response)
             _log_payload_debug(exc.response.status_code, path, payload, message)
             if _should_retry_as_chat(style, exc.response.status_code, message):
                 fallback_style = _CHAT_STYLE
                 fallback_payload = _build_payload(body, style=fallback_style)
+                tool_reverse = fallback_payload.pop("_tool_name_reverse_map", None)
                 fallback_path = _endpoint_for_style(fallback_style)
                 logger.debug(
                     "Retrying OpenAI request against %s with chat payload after 400: %s",
@@ -495,7 +543,7 @@ class OpenAICompatibleClient:
                 )
                 response = await self.request("POST", fallback_path, json_body=fallback_payload, **headers)
                 data = response.json()
-                return _chat_response_to_responses(data)
+                return _chat_response_to_responses(data, tool_reverse)
             raise
 
     async def post_responses_stream(
@@ -530,6 +578,7 @@ class OpenAICompatibleClient:
             )
             path = _endpoint_for_style(style)
             payload = _build_payload(body, style=style)
+            tool_reverse = payload.pop("_tool_name_reverse_map", None)
 
             try:
                 async with client.stream("POST", path, json=payload, headers=headers) as response:
@@ -554,7 +603,7 @@ class OpenAICompatibleClient:
                         response.raise_for_status()
 
                     if style == _CHAT_STYLE:
-                        async for line in _chat_stream_as_responses(response):
+                        async for line in _chat_stream_as_responses(response, tool_reverse):
                             yield line
                     else:
                         async for line in response.aiter_lines():

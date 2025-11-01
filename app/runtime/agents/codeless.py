@@ -396,6 +396,7 @@ def _build_request(
     *,
     messages_override: Messages | None = None,
     tools_payload: Sequence[Mapping[str, Any]] | None = None,
+    tool_policy: str | None = None,
 ) -> Tuple[Dict[str, Any], Messages, Dict[str, Any], int]:
     data = agent_node.get("data") or {}
     model_cfg = data.get("model") or {}
@@ -413,6 +414,8 @@ def _build_request(
         body["json_mode"] = True
     if tools_payload:
         body["tools"] = [dict(tool) for tool in tools_payload]
+        if tool_policy and str(tool_policy).strip().lower() == "auto":
+            body["tool_choice"] = "auto"
 
     return body, messages, response_format or {}, max_repairs
 
@@ -547,6 +550,7 @@ async def invoke_llm(
         prompt,
         messages_override=conversation,
         tools_payload=tool_runtime.payload,
+        tool_policy=tool_runtime.policy,
     )
 
     response = await _invoke_with_repairs(body, headers=headers, max_repairs=max_repairs, telemetry=telemetry)
@@ -582,6 +586,7 @@ async def invoke_llm(
             prompt,
             messages_override=conversation,
             tools_payload=tool_runtime.payload,
+            tool_policy=tool_runtime.policy,
         )
         response = await _invoke_with_repairs(body, headers=headers, max_repairs=max_repairs, telemetry=telemetry)
 
@@ -618,6 +623,7 @@ async def stream_codeless(
         agent_node,
         prompt,
         tools_payload=tool_runtime.payload,
+        tool_policy=tool_runtime.policy,
     )
     body["stream"] = True
 
@@ -682,6 +688,7 @@ def prepare_codeless_invocation(
         agent_node,
         prompt,
         tools_payload=tool_runtime.payload,
+        tool_policy=tool_runtime.policy,
     )
     return {
         "body": body,
