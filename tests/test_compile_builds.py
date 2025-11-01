@@ -89,7 +89,9 @@ async def test_graph_compiles_and_routes(stub_llm):
 
     builder = GraphBuilder(plan)
     app = builder.build()
-    state = await app.ainvoke({"messages": [], "scratch": {}})
+    state = await app.ainvoke(
+        {"messages": [], "scratch": {}}, config={"configurable": {"thread_id": "test-run"}}
+    )
 
     assert state["route"]["target"] == "seq"
     assistant_msgs = [m for m in state.get("messages", []) if m.get("role") == "assistant"]
@@ -109,6 +111,6 @@ async def test_unknown_kind_compiles_to_passthrough():
 
     app = GraphBuilder(plan).build()
     start_state = {"scratch": {"value": 42}}
-    final_state = app.invoke(start_state)
+    final_state = app.invoke(start_state, config={"configurable": {"thread_id": "test-run"}})
 
     assert final_state.get("scratch", {}).get("value") == 42

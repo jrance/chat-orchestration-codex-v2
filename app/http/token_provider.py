@@ -7,6 +7,7 @@ import asyncio
 from typing import Optional, cast
 
 import httpx
+from pydantic import SecretStr
 
 from app.config.settings import settings
 
@@ -59,7 +60,11 @@ class ApigeeTokenProvider:
 
             token_url = settings.apigee_token_url
             client_id = settings.apigee_client_id
-            client_secret = settings.apigee_client_secret
+            client_secret_setting = settings.apigee_client_secret
+            if isinstance(client_secret_setting, SecretStr):
+                client_secret = client_secret_setting.get_secret_value()
+            else:
+                client_secret = client_secret_setting
 
             if not token_url or not client_id or not client_secret:
                 raise RuntimeError(

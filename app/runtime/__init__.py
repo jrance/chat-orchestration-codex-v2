@@ -11,8 +11,13 @@ from .engine import (  # noqa: F401
     run_once,
     run_stream,
 )
-from .checkpointer import InMemoryCheckpointer, get_checkpointer, reset_checkpointer  # noqa: F401
 from .state import Checkpoint, RunState, RunStatus  # noqa: F401
+from .state.checkpointer import (  # noqa: F401
+    InMemoryCheckpointer,
+    RedisCheckpointer,
+    get_checkpointer,
+    reset_checkpointer,
+)
 from .state_store import (  # noqa: F401
     InMemoryRunStateStore,
     RunStateRecord,

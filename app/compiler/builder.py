@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from langgraph.graph import END, StateGraph
 
-from app.runtime.checkpointer import get_checkpointer
+from app.runtime.state.checkpointer import get_checkpointer
 
 from .nodes import ensure_builtin_compilers, get as get_compiler
 from .types import OrchestratorState

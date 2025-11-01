@@ -4,17 +4,41 @@ from __future__ import annotations
 
 import copy
 import os
-from typing import Any, Dict, Mapping, Optional
-
-try:  # pragma: no cover - guard for build environments without langgraph
-    from langgraph.checkpoint import MemorySaver  # type: ignore
-except Exception:  # pragma: no cover
-    MemorySaver = object  # type: ignore[assignment]
+from functools import lru_cache
+from typing import Any, Dict, Mapping, Optional, Type
 
 from app.config.settings import settings
 
 from .backends import MemoryCheckpointBackend, RedisCheckpointBackend
 from .models import Checkpoint, RunState, RunStatus
+
+
+@lru_cache(maxsize=1)
+def _resolve_inmemory_saver() -> Type[Any]:
+    """Return an in-memory saver class that matches the installed LangGraph version."""
+
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver  # type: ignore
+
+        return InMemorySaver
+    except Exception:
+        pass
+
+    try:
+        from langgraph.checkpoint.memory import MemorySaver  # type: ignore
+
+        return MemorySaver
+    except Exception:
+        pass
+
+    try:
+        from langgraph.checkpoint import MemorySaver  # type: ignore
+
+        return MemorySaver
+    except Exception as exc:  # pragma: no cover - escalated failure path
+        raise ImportError(
+            "LangGraph memory checkpointer not found. Install a compatible version of langgraph."
+        ) from exc
 
 
 class Checkpointer:
@@ -59,14 +83,20 @@ class CheckpointManager(Checkpointer):
         backend: MemoryCheckpointBackend | RedisCheckpointBackend,
     ) -> None:
         self._backend = backend
-        if MemorySaver is object:
-            self._saver: Any = None
+        self._saver: Any | None = None
+
+        try:
+            saver_cls = _resolve_inmemory_saver()
+        except ImportError:
+            self._saver = None
         else:
-            self._saver = MemorySaver()  # type: ignore[call-arg]
+            self._saver = saver_cls()
 
     def get_saver(self) -> Any:
         if self._saver is None:
-            raise RuntimeError("LangGraph MemorySaver unavailable; install langgraph>=1.0")
+            raise RuntimeError(
+                "LangGraph in-memory saver unavailable; ensure langgraph is installed and compatible."
+            )
         return self._saver
 
     def save_checkpoint(
@@ -193,6 +223,7 @@ def reset_checkpointer() -> None:
 
 
 __all__ = [
+    "_resolve_inmemory_saver",
     "Checkpoint",
     "CheckpointManager",
     "Checkpointer",

@@ -34,15 +34,12 @@ def test_memory_saver_presence(monkeypatch: pytest.MonkeyPatch):
     reset_checkpointer()
     checkpointer = get_checkpointer()
 
-    try:
-        from langgraph.checkpoint import MemorySaver  # type: ignore
-    except Exception:
-        with pytest.raises(RuntimeError):
-            checkpointer.get_saver()
-        return
+    from app.runtime.state.checkpointer import _resolve_inmemory_saver
 
     saver = checkpointer.get_saver()
-    assert isinstance(saver, MemorySaver)
+    saver_cls = _resolve_inmemory_saver()
+
+    assert isinstance(saver, saver_cls)
 
 
 def test_factory_returns_redis_checkpointer(monkeypatch: pytest.MonkeyPatch):

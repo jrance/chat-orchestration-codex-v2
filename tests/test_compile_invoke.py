@@ -38,7 +38,10 @@ async def test_stub_agent_invocation_produces_message(stub_llm):
     assert ok, errs
 
     app = GraphBuilder(plan).build()
-    state = await app.ainvoke({"messages": [{"role": "user", "content": "hello", "ts": time.time()}]})
+    state = await app.ainvoke(
+        {"messages": [{"role": "user", "content": "hello", "ts": time.time()}]},
+        config={"configurable": {"thread_id": "test-run"}},
+    )
 
     assistant_msgs = [m for m in state.get("messages", []) if m.get("role") == "assistant"]
     assert assistant_msgs, "Expected stub agent to emit an assistant message"

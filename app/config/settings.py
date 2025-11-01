@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,9 +24,11 @@ class Settings(BaseSettings):
     log_redaction_enabled: bool = False
 
     # Apigee / OpenAI-compatible gateway
-    apigee_token_url: str | None = None
-    apigee_client_id: str | None = None
-    apigee_client_secret: str | None = None
+    apigee_token_url: str | None = Field(default=None, validation_alias="APIGEE_TOKEN_URL")
+    apigee_client_id: str | None = Field(default=None, validation_alias="APIGEE_CLIENT_ID")
+    apigee_client_secret: SecretStr | None = Field(
+        default=None, validation_alias="APIGEE_CLIENT_SECRET"
+    )
     apigee_audience: str | None = None
     apigee_scopes: str = "openid"
     openai_base_url: str = "http://localhost:8000"
@@ -79,7 +82,13 @@ class Settings(BaseSettings):
         "Cache-Control",
     ]
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.local"),
+        env_file_encoding="utf-8",
+        env_prefix="",
+        extra="allow",
+        case_sensitive=False,
+    )
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
         """Backfill legacy HTTP tuning defaults when new knobs are provided."""
