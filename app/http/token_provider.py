@@ -58,6 +58,9 @@ class ApigeeTokenProvider:
             if not force_refresh and self._cache.is_valid():
                 return cast(str, self._cache.access_token)
 
+            if settings.openai_api_key:
+                return settings.openai_api_key
+            
             token_url = settings.apigee_token_url
             client_id = settings.apigee_client_id
             client_secret_setting = settings.apigee_client_secret

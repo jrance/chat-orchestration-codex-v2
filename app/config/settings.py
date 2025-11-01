@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     apigee_audience: str | None = None
     apigee_scopes: str = "openid"
     openai_base_url: str = "http://localhost:8000"
+    openai_api_key: str | None = None
     apigee_extra_headers_json: str | None = None
 
     # HTTP client tuning
