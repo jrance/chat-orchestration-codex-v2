@@ -265,6 +265,8 @@ async def _execute_tool_call(
     call: ToolCall,
     runtime: ToolRuntime,
     telemetry: Optional[TelemetryStreamer],
+    *,
+    index: int | None = None,
 ) -> ToolResult:
     tool_name = str(call.get("name") or "")
     raw_arguments = call.get("arguments") or {}
@@ -278,17 +280,36 @@ async def _execute_tool_call(
     call_id = str(call.get("id") or "")
     args_shape = sorted(args.keys())
 
+    base_payload: Dict[str, Any] = {
+        "tool_call_id": call_id,
+        "name": tool_name,
+        "args_shape": args_shape,
+    }
+    if index is not None:
+        base_payload["index"] = index
+
     if telemetry:
+        request_payload: Dict[str, Any] = {"tool": tool_name, "callId": call.get("id")}
+        if index is not None:
+            request_payload["index"] = index
         await telemetry.publish(
             TelemetryEvent(
                 event="telemetry.tool.request",
-                payload={"tool": tool_name, "callId": call.get("id")},
+                payload=request_payload,
             )
         )
         await telemetry.publish(
             TelemetryEvent(
                 event="response.tool_call.created",
-                payload={"tool_call_id": call_id, "name": tool_name, "args_shape": args_shape},
+                payload=dict(base_payload),
+            )
+        )
+        running_payload = dict(base_payload)
+        running_payload["status"] = "running"
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_call.delta",
+                payload=running_payload,
             )
         )
 
@@ -320,33 +341,66 @@ async def _execute_tool_call(
             return 1
 
         result_count = _result_count(result_payload)
-        created_payload = {
+        created_payload: Dict[str, Any] = {
             "tool_call_id": call_id,
             "name": tool_name,
-            "status": status,
         }
+        if index is not None:
+            created_payload["index"] = index
         if result_count is not None:
             created_payload["result_count"] = result_count
+        if runtime.redact:
+            created_payload["redacted"] = True
+        if status != "ok":
+            created_payload["error"] = True
         await telemetry.publish(
             TelemetryEvent(
                 event="response.tool_result.created",
                 payload=created_payload,
             )
         )
+
+        done_payload: Dict[str, Any] = {
+            "tool_call_id": call_id,
+            "name": tool_name,
+        }
+        if index is not None:
+            done_payload["index"] = index
+        if not runtime.redact:
+            done_payload["output"] = result.get("output")
+        if status != "ok":
+            done_payload["error"] = True
         await telemetry.publish(
             TelemetryEvent(
                 event="response.tool_result.done",
-                payload={
-                    "tool_call_id": call_id,
-                    "name": tool_name,
-                    "status": status,
-                },
+                payload=done_payload,
+            )
+        )
+
+        completion_delta = dict(base_payload)
+        completion_delta["status"] = "completed" if status == "ok" else "error"
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_call.delta",
+                payload=completion_delta,
+            )
+        )
+        done_call_payload = dict(base_payload)
+        done_call_payload["status"] = completion_delta["status"]
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_call.done",
+                payload=done_call_payload,
             )
         )
         await telemetry.publish(
             TelemetryEvent(
                 event="telemetry.tool.response",
-                payload={"tool": tool_name, "status": status},
+                payload={
+                    "tool": tool_name,
+                    "status": status,
+                    **({"index": index} if index is not None else {}),
+                },
             )
         )
 
@@ -362,16 +416,18 @@ async def _execute_tool_calls(
         return []
 
     semaphore = asyncio.Semaphore(max(1, runtime.parallelism))
-    results: List[ToolResult] = []
+    results: List[ToolResult | None] = [None] * len(calls)
 
-    async def _run(call: ToolCall) -> ToolResult:
+    async def _run(idx: int, call: ToolCall) -> tuple[int, ToolResult]:
         async with semaphore:
-            return await _execute_tool_call(call, runtime, telemetry)
+            result = await _execute_tool_call(call, runtime, telemetry, index=idx)
+        return idx, result
 
-    tasks = [asyncio.create_task(_run(call)) for call in calls]
-    for task in tasks:
-        results.append(await task)
-    return results
+    tasks = [asyncio.create_task(_run(idx, call)) for idx, call in enumerate(calls)]
+    for task in asyncio.as_completed(tasks):
+        idx, result = await task
+        results[idx] = result
+    return [item for item in results if item is not None]
 
 
 def _append_tool_messages(target: List[Dict[str, Any]], results: Iterable[ToolResult]) -> None:

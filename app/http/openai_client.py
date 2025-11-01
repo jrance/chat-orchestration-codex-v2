@@ -73,6 +73,8 @@ def _decompose_body(body: Mapping[str, Any]) -> tuple[str, bool, Sequence[Turn],
 def _build_payload(body: Mapping[str, Any], *, style: str) -> dict[str, Any]:
     model, stream, turns, params = _decompose_body(body)
     params_copy = dict(params)
+    if style == _CHAT_STYLE and settings.parallel_tool_calls_enabled and "parallel_tool_calls" not in params_copy:
+        params_copy["parallel_tool_calls"] = True
     if style == _CHAT_STYLE:
         return build_chat_messages(turns, model, stream, **params_copy)
     return build_responses_body(turns, model, stream, **params_copy)

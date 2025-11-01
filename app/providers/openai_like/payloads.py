@@ -91,6 +91,7 @@ def build_chat_messages(
     *,
     tools: Iterable[Dict[str, Any]] | None = None,
     tool_choice: str | Dict[str, Any] | None = None,
+    parallel_tool_calls: bool | None = None,
     **params: Any,
 ) -> dict[str, Any]:
     """Return a Chat Completions-compatible payload."""
@@ -118,6 +119,8 @@ def build_chat_messages(
         body["tools"] = chat_tools
     if tool_choice is not None:
         body["tool_choice"] = tool_choice
+    if parallel_tool_calls is not None:
+        body["parallel_tool_calls"] = bool(parallel_tool_calls)
 
     visible_params = {k: v for k, v in extras.items() if v is not None and not str(k).startswith("_")}
     body.update(visible_params)

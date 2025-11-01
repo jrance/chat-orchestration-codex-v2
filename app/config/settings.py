@@ -90,6 +90,12 @@ class Settings(BaseSettings):
         "Cache-Control",
     ]
 
+    # Parallel tool call support (PR-022)
+    parallel_tool_calls_enabled: bool = Field(
+        default=True,
+        alias="PARALLEL_TOOL_CALLS_ENABLED",
+    )
+
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
