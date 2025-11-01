@@ -266,8 +266,18 @@ async def _execute_tool_call(
     runtime: ToolRuntime,
     telemetry: Optional[TelemetryStreamer],
 ) -> ToolResult:
-    tool_name = call.get("name") or ""
-    args = call.get("arguments") or {}
+    tool_name = str(call.get("name") or "")
+    raw_arguments = call.get("arguments") or {}
+    if isinstance(raw_arguments, Mapping):
+        args = dict(raw_arguments)
+    else:
+        try:
+            args = dict(raw_arguments)
+        except Exception:
+            args = {}
+    call_id = str(call.get("id") or "")
+    args_shape = sorted(args.keys())
+
     if telemetry:
         await telemetry.publish(
             TelemetryEvent(
@@ -275,31 +285,72 @@ async def _execute_tool_call(
                 payload={"tool": tool_name, "callId": call.get("id")},
             )
         )
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_call.created",
+                payload={"tool_call_id": call_id, "name": tool_name, "args_shape": args_shape},
+            )
+        )
+
+    status = "ok"
+    result_payload: Dict[str, Any] | str | Any
     try:
         if tool_name.startswith("mcp:"):
             result_payload = await _invoke_mcp_tool(tool_name, args, runtime)
         else:
             timeout_ms = _tool_timeout_ms(call, runtime)
             result_payload = await invoke_tool(tool_name, args, per_call_timeout_ms=timeout_ms)
-        result = _tool_result_payload(call, result_payload)
-        if telemetry:
-            await telemetry.publish(
-                TelemetryEvent(
-                    event="telemetry.tool.response",
-                    payload={"tool": tool_name, "status": "ok"},
-                )
-            )
-        return result
     except Exception as exc:  # pragma: no cover - defensive
-        error_result = _tool_result_payload(call, {"error": str(exc)})
-        if telemetry:
-            await telemetry.publish(
-                TelemetryEvent(
-                    event="telemetry.tool.response",
-                    payload={"tool": tool_name, "status": "error"},
-                )
+        status = "error"
+        result_payload = {"error": str(exc)}
+
+    result = _tool_result_payload(call, result_payload)
+
+    if telemetry:
+        def _result_count(payload: Any) -> int | None:
+            if isinstance(payload, Mapping):
+                results = payload.get("results")
+                if isinstance(results, list):
+                    return len(results)
+                return 1 if payload else 0
+            if isinstance(payload, list):
+                return len(payload)
+            if payload in (None, "", {}):
+                return 0
+            return 1
+
+        result_count = _result_count(result_payload)
+        created_payload = {
+            "tool_call_id": call_id,
+            "name": tool_name,
+            "status": status,
+        }
+        if result_count is not None:
+            created_payload["result_count"] = result_count
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_result.created",
+                payload=created_payload,
             )
-        return error_result
+        )
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.tool_result.done",
+                payload={
+                    "tool_call_id": call_id,
+                    "name": tool_name,
+                    "status": status,
+                },
+            )
+        )
+        await telemetry.publish(
+            TelemetryEvent(
+                event="telemetry.tool.response",
+                payload={"tool": tool_name, "status": status},
+            )
+        )
+
+    return result
 
 
 async def _execute_tool_calls(
