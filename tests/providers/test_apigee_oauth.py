@@ -1,9 +1,9 @@
 import asyncio
 
-import pytest
 import httpx
+import pytest
 
-from app.config.settings import reload_settings
+from app.config.settings import reload_settings, settings
 from app.http.token_provider import ApigeeTokenProvider
 
 
@@ -30,9 +30,12 @@ def reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "APIGEE_CLIENT_SECRET",
         "APIGEE_SCOPES",
         "APIGEE_AUDIENCE",
+        "OPENAI_API_KEY",
     ]:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", " ")
     reload_settings()
+    settings.openai_api_key = None
     yield
     reload_settings()
 

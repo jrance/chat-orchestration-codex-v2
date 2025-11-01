@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 
 from app.config.settings import settings
+from app.http.client_factory import create_gateway_client
 from app.http.headers import build_default_headers
 from app.http.token_provider import ApigeeTokenProvider
 
@@ -18,33 +19,16 @@ _client: httpx.AsyncClient | None = None
 
 
 def _make_async_client(transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
-    limits = httpx.Limits(
-        max_connections=settings.http_pool_max_connections,
-        max_keepalive_connections=settings.http_pool_max_keepalive,
-    )
-    timeout = httpx.Timeout(
-        connect=settings.http_connect_timeout,
-        read=settings.http_read_timeout,
-        write=settings.http_write_timeout,
-        pool=settings.http_read_timeout,
-    )
-    return httpx.AsyncClient(
-        base_url=settings.openai_base_url or "",
-        timeout=timeout,
-        limits=limits,
-        transport=transport,
-        follow_redirects=True,
-        headers={"Accept": "application/json"},
-    )
+    return create_gateway_client(transport=transport)
 
 
 def get_client(transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
     """Return the shared AsyncClient or create one with a custom transport."""
     global _client
     if transport is not None:
-        return _make_async_client(transport=transport)
+        return create_gateway_client(transport=transport)
     if _client is None:
-        _client = _make_async_client()
+        _client = create_gateway_client()
     return _client
 
 

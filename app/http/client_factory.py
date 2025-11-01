@@ -1,0 +1,114 @@
+"""Factory helpers for shared HTTPX AsyncClient instances."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+from app.config.settings import settings
+
+from .proxy import build_httpx_proxies, build_ssl_verify
+
+_gateway_client: httpx.AsyncClient | None = None
+_token_client: httpx.AsyncClient | None = None
+
+
+def _apply_proxy_kwargs(kwargs: dict[str, Any]) -> None:
+    if kwargs.get("transport") is None:
+        proxies = build_httpx_proxies()
+        if proxies:
+            kwargs["proxies"] = proxies
+    verify = build_ssl_verify()
+    kwargs["verify"] = verify
+    kwargs["trust_env"] = False
+
+
+def _gateway_client_kwargs(*, transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
+    timeout = httpx.Timeout(
+        connect=settings.http_connect_timeout,
+        read=settings.http_read_timeout,
+        write=settings.http_write_timeout,
+        pool=settings.http_read_timeout,
+    )
+    limits = httpx.Limits(
+        max_connections=settings.http_pool_max_connections,
+        max_keepalive_connections=settings.http_pool_max_keepalive,
+    )
+    kwargs: dict[str, Any] = {
+        "base_url": settings.openai_base_url or "",
+        "timeout": timeout,
+        "limits": limits,
+        "follow_redirects": True,
+        "headers": {"Accept": "application/json"},
+    }
+    if transport is not None:
+        kwargs["transport"] = transport
+    _apply_proxy_kwargs(kwargs)
+    return kwargs
+
+
+def _token_client_kwargs(*, transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(15.0),
+        "headers": {"Accept": "application/json"},
+    }
+    if transport is not None:
+        kwargs["transport"] = transport
+    _apply_proxy_kwargs(kwargs)
+    return kwargs
+
+
+def create_gateway_client(*, transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
+    """Return a newly constructed AsyncClient configured for gateway calls."""
+    return httpx.AsyncClient(**_gateway_client_kwargs(transport=transport))
+
+
+def create_token_client(*, transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
+    """Return a newly constructed AsyncClient configured for token calls."""
+    return httpx.AsyncClient(**_token_client_kwargs(transport=transport))
+
+
+def get_gateway_client() -> httpx.AsyncClient:
+    """Return the shared AsyncClient for gateway calls, creating it on demand."""
+    global _gateway_client
+    if _gateway_client is None:
+        _gateway_client = create_gateway_client()
+    return _gateway_client
+
+
+def get_token_client() -> httpx.AsyncClient:
+    """Return the shared AsyncClient for token endpoint calls."""
+    global _token_client
+    if _token_client is None:
+        _token_client = create_token_client()
+    return _token_client
+
+
+def reset_clients() -> None:
+    """Reset cached clients (primarily for testing)."""
+    global _gateway_client, _token_client
+    for client in (_gateway_client, _token_client):
+        if client is not None:
+            client.close()
+    _gateway_client = None
+    _token_client = None
+    try:
+        from app.http import openai_client as _openai_client
+    except Exception:
+        return
+    if getattr(_openai_client, "_client", None) is not None:
+        try:
+            _openai_client._client.close()
+        except Exception:
+            pass
+        _openai_client._client = None
+
+
+__all__ = [
+    "create_gateway_client",
+    "create_token_client",
+    "get_gateway_client",
+    "get_token_client",
+    "reset_clients",
+]

@@ -14,6 +14,7 @@ def reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "APIGEE_CLIENT_SECRET",
         "APIGEE_AUDIENCE",
         "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
         "HTTP_RETRY_MAX_ATTEMPTS",
         "HTTP_MAX_RETRIES",
         "HTTP_TIMEOUT_SECONDS",
@@ -21,7 +22,9 @@ def reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "HTTP_RETRY_BASE_DELAY",
     ]:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", " ")
     reload_settings()
+    settings.openai_api_key = None
     yield
     reload_settings()
 

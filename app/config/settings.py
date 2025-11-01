@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     http_pool_max_keepalive: int = 20
     http_retry_max_attempts: int = 3
     http_retry_base_delay: float = 0.2
+    proxy_enabled: bool = Field(default=False, alias="PROXY_ENABLED")
+    proxy_url: str | None = Field(default=None, alias="PROXY_URL")
+    proxy_ca_bundle: str | None = Field(default=None, alias="PROXY_CA_BUNDLE")
 
     # Validation (PR-04)
     orch_schema_path: str = "schemas/orchestration_ir.schema.json"
@@ -89,6 +92,7 @@ class Settings(BaseSettings):
         env_prefix="",
         extra="allow",
         case_sensitive=False,
+        env_ignore_empty=True,
     )
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
@@ -162,5 +166,11 @@ def reload_settings() -> Settings:
     """Reload settings from the environment in-place (useful during testing)."""
     new_settings = Settings()
     settings.__dict__.update(new_settings.__dict__)
+    try:
+        from app.http.client_factory import reset_clients
+    except Exception:
+        pass
+    else:
+        reset_clients()
     return settings
 

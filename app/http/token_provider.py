@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import time
 import asyncio
+import time
 from typing import Optional, cast
 
 import httpx
 from pydantic import SecretStr
 
 from app.config.settings import settings
+from app.http.client_factory import create_token_client, get_token_client
 
 TOKEN_SKEW_SECONDS = 60
 TOKEN_DEFAULT_EXPIRY = 300
@@ -58,9 +59,10 @@ class ApigeeTokenProvider:
             if not force_refresh and self._cache.is_valid():
                 return cast(str, self._cache.access_token)
 
-            if settings.openai_api_key:
-                return settings.openai_api_key
-            
+            api_key = (settings.openai_api_key or "").strip()
+            if api_key:
+                return api_key
+
             token_url = settings.apigee_token_url
             client_id = settings.apigee_client_id
             client_secret_setting = settings.apigee_client_secret
@@ -87,12 +89,17 @@ class ApigeeTokenProvider:
             if audience:
                 form_data["audience"] = audience
 
-            timeout = httpx.Timeout(15.0)
-            async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
+            if self._transport is not None:
+                async with create_token_client(transport=self._transport) as client:
+                    response = await client.post(
+                        token_url,
+                        data=form_data,
+                    )
+            else:
+                client = get_token_client()
                 response = await client.post(
                     token_url,
                     data=form_data,
-                    headers={"Accept": "application/json"},
                 )
             response.raise_for_status()
             payload = response.json()
