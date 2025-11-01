@@ -20,9 +20,17 @@ def reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "HTTP_TIMEOUT_SECONDS",
         "HTTP_RETRY_BACKOFF_MS",
         "HTTP_RETRY_BASE_DELAY",
+        "PROXY_ENABLED",
+        "PROXY_URL",
+        "PROXY_CA_BUNDLE",
+        "OPENAI_API_STYLE",
+        "OPENAI_RESPONSES_FALLBACK_TO_CHAT",
     ]:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", " ")
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_API_STYLE", "responses")
+    monkeypatch.setenv("OPENAI_RESPONSES_FALLBACK_TO_CHAT", "true")
     reload_settings()
     settings.openai_api_key = None
     yield
@@ -140,6 +148,7 @@ async def test_retries_on_transient_status(monkeypatch: pytest.MonkeyPatch) -> N
 async def test_missing_base_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "")
     reload_settings()
+    monkeypatch.setattr(settings, "openai_base_url", "")
 
     transport = _MockGatewayTransport()
     client = OpenAICompatibleClient(transport=transport)
@@ -163,14 +172,15 @@ async def test_request_uses_global_client_and_extra_headers(monkeypatch: pytest.
     transport = _MockGatewayTransport()
     original_make = openai_module._make_async_client
 
-    def patched_make(transport_override: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
-        return original_make(transport=transport_override or transport)
+    def patched_make(*, transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
+        return original_make(transport=transport or transport_obj)
 
+    transport_obj = transport
     monkeypatch.setattr(openai_module, "_make_async_client", patched_make)
     monkeypatch.setattr(openai_module, "_client", None)
 
     token_provider = ApigeeTokenProvider(transport=transport)
-    client = OpenAICompatibleClient(token_provider=token_provider)
+    client = OpenAICompatibleClient(token_provider=token_provider, transport=transport)
     try:
         response = await client.request(
             "POST",

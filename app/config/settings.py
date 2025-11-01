@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     openai_base_url: str = "http://localhost:8000"
     openai_api_key: str | None = None
     apigee_extra_headers_json: str | None = None
+    openai_api_style: str = Field(default="responses", alias="OPENAI_API_STYLE")
+    openai_responses_fallback_to_chat: bool = Field(
+        default=True, alias="OPENAI_RESPONSES_FALLBACK_TO_CHAT"
+    )
 
     # HTTP client tuning
     http_timeout_seconds: float = 30.0
