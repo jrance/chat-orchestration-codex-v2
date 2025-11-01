@@ -7,6 +7,7 @@ import copy
 import json
 import time
 from dataclasses import dataclass, field
+from io import StringIO
 from typing import Any, AsyncIterator, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.api.models import ToolResultPayload
@@ -73,11 +74,16 @@ class PendingFunctionCall:
     call_id: str | None = None
     sanitized_name: str | None = None
     internal_name: str | None = None
-    arguments_buffer: List[str] = field(default_factory=list)
+    arguments_buffer: StringIO = field(default_factory=StringIO)
     last_payload: Dict[str, Any] | None = None
+    completed: bool = False
 
     def update(self, payload: Mapping[str, Any]) -> None:
         self.last_payload = dict(payload)
+        event_type = str(payload.get("type") or "")
+        is_done_event = event_type.endswith(".done")
+        if is_done_event:
+            self.completed = True
         call_id = payload.get("tool_call_id") or payload.get("id")
         if call_id:
             self.call_id = str(call_id)
@@ -89,16 +95,23 @@ class PendingFunctionCall:
             self.internal_name = str(internal)
         arguments = payload.get("arguments")
         if isinstance(arguments, str) and arguments:
-            self.arguments_buffer.append(arguments)
+            if is_done_event:
+                self.arguments_buffer = StringIO()
+            self.arguments_buffer.write(arguments)
         elif isinstance(arguments, Mapping):
             try:
-                self.arguments_buffer.append(json.dumps(arguments))
+                serialized = json.dumps(arguments)
             except (TypeError, ValueError):
-                pass
+                serialized = ""
+            if serialized:
+                if is_done_event:
+                    self.arguments_buffer = StringIO()
+                self.arguments_buffer.write(serialized)
 
     def arguments_text(self) -> str:
-        if self.arguments_buffer:
-            return "".join(self.arguments_buffer)
+        text = self.arguments_buffer.getvalue()
+        if text:
+            return text
         if self.last_payload is None:
             return ""
         arguments = self.last_payload.get("arguments")
@@ -149,7 +162,7 @@ class PendingToolCalls:
             self.by_call_id[call_id] = entry
         return entry
 
-    def to_plan(self, runtime: ToolRuntime, *, limit: Optional[int] = None) -> List[ToolCallPlanItem]:
+    def to_plan(self, runtime: ToolRuntime, *, limit: Optional[int] = None, turn_finished: bool = False) -> List[ToolCallPlanItem]:
         ordered_indices = sorted(self.by_index)
         if limit is not None:
             ordered_indices = ordered_indices[: max(0, limit)]
@@ -169,8 +182,11 @@ class PendingToolCalls:
                 sanitized = sanitize_tool_name(internal)
 
             arguments_text = pending.arguments_text()
+            ready_for_parse = turn_finished or pending.completed or _appears_complete_json(arguments_text)
+            if arguments_text and not ready_for_parse:
+                return []
             arguments = _parse_tool_arguments(arguments_text)
-            if not arguments_text:
+            if not arguments_text and arguments:
                 try:
                     arguments_text = json.dumps(arguments)
                 except (TypeError, ValueError):
@@ -334,6 +350,36 @@ def _prepare_tool_runtime(
         sanitized_names=sanitized_names,
     )
     return runtime
+
+
+def _appears_complete_json(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return False
+    depth = 0
+    escaped = False
+    in_string = False
+    for ch in stripped:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not in_string
 
 
 def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:

@@ -273,6 +273,7 @@ async def _chat_stream_as_responses(
     usage: dict[str, Any] = {}
     response_id: str | None = None
     model_name: str | None = None
+    finish_reason: str | None = None
     tool_states: dict[str, dict[str, Any]] = {}
 
     async for raw_line in response.aiter_lines():
@@ -371,8 +372,10 @@ async def _chat_stream_as_responses(
                                 yield f"data: {json.dumps(payload_obj)}"
                                 yield ""
 
-                finish_reason = choice.get("finish_reason")
-                if finish_reason == "tool_calls":
+                choice_finish = choice.get("finish_reason")
+                if isinstance(choice_finish, str) and choice_finish:
+                    finish_reason = choice_finish
+                if choice_finish == "tool_calls":
                     continue
 
     for entry in tool_states.values():
@@ -405,6 +408,9 @@ async def _chat_stream_as_responses(
         response_meta["id"] = response_id
     if model_name:
         response_meta["model"] = model_name
+    if finish_reason:
+        response_meta["finish_reason"] = finish_reason
+        completed_payload["finish_reason"] = finish_reason
     if response_meta:
         completed_payload["response"] = response_meta
     if tool_states:

@@ -832,6 +832,7 @@ async def run_stream(
                 pending_calls = codeless_mod.PendingToolCalls()
                 output_delta_seen = False
                 output_done_emitted = False
+                assistant_finish_reason: str | None = None
 
                 async for payload in stream_codeless(
                     current_state,
@@ -851,6 +852,15 @@ async def run_stream(
                         output_delta_seen = True
                     elif canonical_type == "response.output_text.done":
                         output_done_emitted = True
+                    elif canonical_type == "response.completed":
+                        finish_value = (
+                            data.get("finish_reason")
+                            or (data.get("response") or {}).get("finish_reason")
+                        )
+                        if isinstance(finish_value, str) and finish_value:
+                            assistant_finish_reason = finish_value
+                        elif data.get("tool_calls"):
+                            assistant_finish_reason = assistant_finish_reason or "tool_calls"
 
                     if canonical_type in {
                         "response.function_call_arguments.delta",
@@ -884,6 +894,11 @@ async def run_stream(
                 if not tool_runtime.enabled:
                     break
 
+                calls_completed = any(
+                    entry.completed for entry in pending_calls.by_index.values()
+                )
+                turn_finished_with_tools = (assistant_finish_reason == "tool_calls") or calls_completed
+
                 plan_limit: Optional[int] = None
                 if tool_runtime.max_calls is not None:
                     remaining = tool_runtime.max_calls - tool_calls_executed
@@ -891,7 +906,17 @@ async def run_stream(
                         break
                     plan_limit = remaining
 
-                plan_items = pending_calls.to_plan(tool_runtime, limit=plan_limit)
+                plan_items = pending_calls.to_plan(
+                    tool_runtime,
+                    limit=plan_limit,
+                    turn_finished=turn_finished_with_tools,
+                )
+                if not plan_items and pending_calls and not turn_finished_with_tools:
+                    plan_items = pending_calls.to_plan(
+                        tool_runtime,
+                        limit=plan_limit,
+                        turn_finished=True,
+                    )
                 if not plan_items:
                     break
 
