@@ -162,6 +162,8 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
         redact=False,
         enabled=True,
         mcp_servers={},
+        name_reverse={},
+        sanitized_names={},
     )
 
     monkeypatch.setattr(engine_mod.codeless_mod, "_prepare_tool_runtime", lambda *args, **kwargs: tool_runtime)

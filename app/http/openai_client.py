@@ -317,7 +317,7 @@ async def _chat_stream_as_responses(
 
                     tool_delta = delta.get("tool_calls")
                     if isinstance(tool_delta, Sequence):
-                        for entry in tool_delta:
+                        for entry_idx, entry in enumerate(tool_delta):
                             if not isinstance(entry, Mapping):
                                 continue
                             tool_id = str(entry.get("id") or "")
@@ -330,15 +330,29 @@ async def _chat_stream_as_responses(
                             state_key = tool_id or mapped_name or f"tool_{len(tool_states)+1}"
                             state = tool_states.setdefault(
                                 state_key,
-                                {"name": mapped_name, "chunks": [], "id": tool_id or None},
+                                {
+                                    "name": mapped_name,
+                                    "chunks": [],
+                                    "id": tool_id or None,
+                                    "sanitized": name,
+                                    "index": entry_idx,
+                                },
                             )
                             state["name"] = mapped_name or state["name"]
+                            if tool_id:
+                                state["id"] = tool_id
+                            if name:
+                                state["sanitized"] = name
+                            if state.get("index") is None:
+                                state["index"] = entry_idx
                             if isinstance(arguments, str):
                                 state["chunks"].append(arguments)
                                 payload_obj = {
                                     "tool_call_id": state["id"],
                                     "name": state["name"],
                                     "arguments": arguments,
+                                    "function_name": state.get("sanitized"),
+                                    "index": state.get("index"),
                                 }
                                 yield "event: response.function_call_arguments.delta"
                                 yield f"data: {json.dumps(payload_obj)}"
@@ -350,6 +364,8 @@ async def _chat_stream_as_responses(
                                     "tool_call_id": state["id"],
                                     "name": state["name"],
                                     "arguments": serialized,
+                                    "function_name": state.get("sanitized"),
+                                    "index": state.get("index"),
                                 }
                                 yield "event: response.function_call_arguments.delta"
                                 yield f"data: {json.dumps(payload_obj)}"
@@ -363,6 +379,8 @@ async def _chat_stream_as_responses(
         payload_obj = {
             "tool_call_id": entry.get("id"),
             "name": entry.get("name"),
+            "function_name": entry.get("sanitized"),
+            "index": entry.get("index"),
         }
         arguments_text = "".join(entry.get("chunks") or [])
         if arguments_text:
@@ -394,6 +412,8 @@ async def _chat_stream_as_responses(
             {
                 "id": entry.get("id"),
                 "name": entry.get("name"),
+                "function_name": entry.get("sanitized"),
+                "index": entry.get("index"),
                 "arguments": "".join(entry.get("chunks") or []),
             }
             for entry in tool_states.values()

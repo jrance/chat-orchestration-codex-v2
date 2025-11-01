@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import time
@@ -29,6 +30,7 @@ from app.runtime.state import Checkpoint, RunStatus, get_checkpointer
 from app.runtime.state_store import RunStateRecord, get_run_state_store
 from app.telemetry.models import TelemetryEvent, TelemetryLevel
 from app.telemetry.streams import alias_event_types, canonical_event_type, response_event
+from app.sse.events import tool_event, tool_result_event
 from app.telemetry.streamer import TelemetryStreamer
 
 
@@ -807,135 +809,229 @@ async def run_stream(
                 mcp_servers,
             )
             runtime_ctx = get_runtime_context()
+            agent_data = node.get("data") or {}
+            conversation_messages = list(
+                codeless_mod._assemble_messages(initial_state, agent_data, prompt)
+            )
+            current_state: OrchestratorState = {"messages": copy.deepcopy(conversation_messages)}
             tool_calls_executed = 0
-            pending_call_arguments: Dict[str, Dict[str, Any]] = {}
-            output_delta_seen = False
-            output_done_emitted = False
-            async for payload in stream_codeless(
-                initial_state,
-                node,
-                prompt,
-                attached_tools=attached_tools,
-                mcp_servers=mcp_servers,
-            ):
-                raw_type = str(payload.get("type") or payload.get("event") or "message")
-                canonical_type = canonical_event_type(raw_type)
-                data = dict(payload)
-                data["type"] = canonical_type
-                data.setdefault("run_id", context.run_id or "")
-                data.setdefault("thread_id", context.thread_id or "")
 
-                if canonical_type == "response.output_text.delta":
-                    output_delta_seen = True
-                elif canonical_type == "response.output_text.done":
-                    output_done_emitted = True
+            def _result_count(payload: Any) -> int | None:
+                if isinstance(payload, Mapping):
+                    results = payload.get("results")
+                    if isinstance(results, list):
+                        return len(results)
+                    return 1 if payload else 0
+                if isinstance(payload, list):
+                    return len(payload)
+                if payload in (None, "", {}):
+                    return 0
+                return 1
 
-                events_to_emit: List[Dict[str, Any]] = []
-                trailing_events: List[Dict[str, Any]] = []
+            while True:
+                pending_calls = codeless_mod.PendingToolCalls()
+                output_delta_seen = False
+                output_done_emitted = False
 
-                if canonical_type in {
-                    "response.function_call_arguments.delta",
-                    "response.function_call_arguments.done",
-                }:
-                    call_identifier = str(
-                        data.get("tool_call_id")
-                        or data.get("call_id")
-                        or data.get("id")
-                        or ""
-                    )
-                    call_name = str(data.get("name") or data.get("tool_name") or "")
-                    pending_key = call_identifier or call_name or "__anonymous__"
-                    entry = pending_call_arguments.setdefault(
-                        pending_key,
-                        {"name": call_name, "chunks": [], "last_payload": data, "key": pending_key},
-                    )
-                    entry["name"] = call_name or entry.get("name") or ""
-                    entry["last_payload"] = data
-                    if canonical_type == "response.function_call_arguments.delta":
-                        arguments_chunk = data.get("arguments")
-                        if isinstance(arguments_chunk, str):
-                            entry["chunks"].append(arguments_chunk)
-                        elif isinstance(arguments_chunk, Mapping):
-                            entry["chunks"].append(json.dumps(arguments_chunk))
-                    else:
-                        stored_entry = pending_call_arguments.pop(
-                            entry.get("key", pending_key),
-                            entry,
-                        )
-                        entry = stored_entry or entry
-                        arguments_text = "".join(entry.get("chunks", []))
-                        if not arguments_text and isinstance(data.get("arguments"), str):
-                            arguments_text = data["arguments"]
-                        tool_arguments = codeless_mod._parse_tool_arguments(
-                            arguments_text if arguments_text else data.get("arguments")
-                        )
-                        tool_call_id = call_identifier or entry["name"] or uuid.uuid4().hex
-                        tool_call = {
-                            "id": tool_call_id,
-                            "name": entry.get("name") or call_name or "",
-                            "arguments": tool_arguments,
-                        }
-                        created_payload = response_event(
-                            "response.tool_result.created",
-                            run_id=context.run_id or "",
-                            thread_id=context.thread_id or "",
-                            data={
-                                "tool_call_id": tool_call_id,
-                                "name": tool_call["name"],
-                            },
-                        )
-                        trailing_events.append(created_payload)
-                        tool_result: Dict[str, Any] | None = None
-                        if tool_runtime.enabled:
-                            if tool_runtime.max_calls is None or tool_calls_executed < tool_runtime.max_calls:
-                                tool_result = await codeless_mod._execute_tool_call(
-                                    tool_call, tool_runtime, runtime_ctx.telemetry if runtime_ctx else None
-                                )
-                                tool_calls_executed += 1
-                        if tool_result is None:
-                            tool_result = {
-                                "id": tool_call["id"],
-                                "name": tool_call["name"],
-                                "output": {},
-                            }
-                        result_payload: Dict[str, Any] = {
-                            "tool_call_id": tool_call_id,
-                            "name": tool_call["name"],
-                        }
-                        if not tool_runtime.redact:
-                            result_payload["output"] = tool_result.get("output")
-                        done_payload = response_event(
-                            "response.tool_result.done",
-                            run_id=context.run_id or "",
-                            thread_id=context.thread_id or "",
-                            data=result_payload,
-                        )
-                        trailing_events.append(done_payload)
-
-                if (
-                    canonical_type == "response.completed"
-                    and output_delta_seen
-                    and not output_done_emitted
+                async for payload in stream_codeless(
+                    current_state,
+                    node,
+                    prompt,
+                    attached_tools=attached_tools,
+                    mcp_servers=mcp_servers,
                 ):
-                    done_payload = response_event(
-                        "response.output_text.done",
+                    raw_type = str(payload.get("type") or payload.get("event") or "message")
+                    canonical_type = canonical_event_type(raw_type)
+                    data = dict(payload)
+                    data["type"] = canonical_type
+                    data.setdefault("run_id", context.run_id or "")
+                    data.setdefault("thread_id", context.thread_id or "")
+
+                    if canonical_type == "response.output_text.delta":
+                        output_delta_seen = True
+                    elif canonical_type == "response.output_text.done":
+                        output_done_emitted = True
+
+                    if canonical_type in {
+                        "response.function_call_arguments.delta",
+                        "response.function_call_arguments.done",
+                    }:
+                        pending_calls.upsert(data)
+
+                    events_to_emit: List[Dict[str, Any]] = [data]
+
+                    if (
+                        canonical_type == "response.completed"
+                        and output_delta_seen
+                        and not output_done_emitted
+                    ):
+                        done_payload = response_event(
+                            "response.output_text.done",
+                            run_id=context.run_id or "",
+                            thread_id=context.thread_id or "",
+                        )
+                        events_to_emit.append(done_payload)
+                        output_done_emitted = True
+
+                    for alias_type in alias_event_types(canonical_type):
+                        alias_payload = dict(data)
+                        alias_payload["type"] = alias_type
+                        events_to_emit.append(alias_payload)
+
+                    for item in events_to_emit:
+                        yield RunStreamEvent(event=item["type"], data=item)
+
+                if not tool_runtime.enabled:
+                    break
+
+                plan_limit: Optional[int] = None
+                if tool_runtime.max_calls is not None:
+                    remaining = tool_runtime.max_calls - tool_calls_executed
+                    if remaining <= 0:
+                        break
+                    plan_limit = remaining
+
+                plan_items = pending_calls.to_plan(tool_runtime, limit=plan_limit)
+                if not plan_items:
+                    break
+
+                for plan_item in plan_items:
+                    base_data = {"function_name": plan_item.sanitized_name}
+                    created_event = tool_event(
+                        "response.tool_call.created",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
                         run_id=context.run_id or "",
                         thread_id=context.thread_id or "",
+                        data=dict(base_data),
                     )
-                    events_to_emit.append(done_payload)
-                    output_done_emitted = True
+                    running_event = tool_event(
+                        "response.tool_call.delta",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                        data={**base_data, "status": "running"},
+                    )
+                    yield RunStreamEvent(event=created_event["type"], data=created_event)
+                    yield RunStreamEvent(event=running_event["type"], data=running_event)
 
-                events_to_emit.append(data)
+                semaphore = asyncio.Semaphore(max(1, tool_runtime.parallelism))
+                queue: asyncio.Queue[tuple[int, Dict[str, Any]]] = asyncio.Queue()
+                results_buffer: List[Dict[str, Any] | None] = [None] * len(plan_items)
 
-                for alias_type in alias_event_types(canonical_type):
-                    alias_payload = dict(data)
-                    alias_payload["type"] = alias_type
-                    events_to_emit.append(alias_payload)
+                async def _worker(position: int, item: codeless_mod.ToolCallPlanItem) -> None:
+                    call_payload = {
+                        "id": item.call_id,
+                        "name": item.internal_name,
+                        "arguments": item.arguments,
+                    }
+                    async with semaphore:
+                        result = await codeless_mod._execute_tool_call(
+                            call_payload,
+                            tool_runtime,
+                            runtime_ctx.telemetry if runtime_ctx else None,
+                            index=item.index,
+                        )
+                    await queue.put((position, result))
 
-                events_to_emit.extend(trailing_events)
+                tasks = [asyncio.create_task(_worker(pos, item)) for pos, item in enumerate(plan_items)]
+                pending_results = len(tasks)
+                while pending_results:
+                    position, result = await queue.get()
+                    plan_item = plan_items[position]
+                    results_buffer[position] = result
+                    raw_output = result.get("output")
+                    result_count = _result_count(raw_output)
+                    error_flag = isinstance(raw_output, Mapping) and bool(raw_output.get("error"))
 
-                for item in events_to_emit:
-                    yield RunStreamEvent(event=item["type"], data=item)
+                    created_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name}
+                    if result_count is not None:
+                        created_extra["result_count"] = result_count
+                    created_event = tool_result_event(
+                        "response.tool_result.created",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                        output=None,
+                        redacted=tool_runtime.redact,
+                        error=error_flag,
+                        extra=created_extra,
+                    )
+                    yield RunStreamEvent(event=created_event["type"], data=created_event)
+
+                    done_event = tool_result_event(
+                        "response.tool_result.done",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                        output=None if tool_runtime.redact else raw_output,
+                        redacted=tool_runtime.redact,
+                        error=error_flag,
+                        extra={"function_name": plan_item.sanitized_name},
+                    )
+                    yield RunStreamEvent(event=done_event["type"], data=done_event)
+
+                    status_text = "error" if error_flag else "completed"
+                    delta_data: Dict[str, Any] = {
+                        "function_name": plan_item.sanitized_name,
+                        "status": status_text,
+                    }
+                    if error_flag:
+                        delta_data["error"] = True
+                    completion_event = tool_event(
+                        "response.tool_call.delta",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                        data=dict(delta_data),
+                    )
+                    done_call_event = tool_event(
+                        "response.tool_call.done",
+                        index=plan_item.index,
+                        tool_call_id=plan_item.call_id,
+                        tool_name=plan_item.internal_name,
+                        run_id=context.run_id or "",
+                        thread_id=context.thread_id or "",
+                        data=dict(delta_data),
+                    )
+                    yield RunStreamEvent(event=completion_event["type"], data=completion_event)
+                    yield RunStreamEvent(event=done_call_event["type"], data=done_call_event)
+                    pending_results -= 1
+
+                await asyncio.gather(*tasks)
+
+                assistant_message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": item.call_id,
+                            "type": "function",
+                            "function": {"name": item.sanitized_name, "arguments": item.arguments_json},
+                        }
+                        for item in plan_items
+                    ],
+                }
+                conversation_messages.append(assistant_message)
+                for idx, item in enumerate(plan_items):
+                    result = results_buffer[idx]
+                    if result is None:
+                        continue
+                    patched_result = dict(result)
+                    patched_result["name"] = item.sanitized_name
+                    codeless_mod._append_tool_messages(conversation_messages, [patched_result])
+
+                current_state = {"messages": copy.deepcopy(conversation_messages)}
+                tool_calls_executed += len(plan_items)
     finally:
         reset_runtime_context(token)
 

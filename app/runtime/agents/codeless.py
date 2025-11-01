@@ -6,7 +6,7 @@ import asyncio
 import copy
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.api.models import ToolResultPayload
@@ -14,6 +14,7 @@ from app.compiler.types import OrchestratorState
 from app.history.window import window as window_messages
 from app.mcp import call_mcp_tool, register_server
 from app.providers.openai_like import create_response, stream_response
+from app.providers.openai_like.payloads import build_chat_messages, sanitize_tool_name
 from app.runtime.context import RuntimeContext, get_runtime_context
 from app.telemetry.models import TelemetryEvent
 from app.telemetry.streamer import TelemetryStreamer
@@ -48,6 +49,152 @@ class ToolRuntime:
     redact: bool
     enabled: bool
     mcp_servers: Mapping[str, Mapping[str, Any]]
+    name_reverse: Dict[str, str] = field(default_factory=dict)
+    sanitized_names: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ToolCallPlanItem:
+    """Normalized plan item for executing a tool call."""
+
+    index: int
+    call_id: str
+    sanitized_name: str
+    internal_name: str
+    arguments: Dict[str, Any]
+    arguments_json: str
+
+
+@dataclass(slots=True)
+class PendingFunctionCall:
+    """Accumulator for a single streaming tool call."""
+
+    index: int
+    call_id: str | None = None
+    sanitized_name: str | None = None
+    internal_name: str | None = None
+    arguments_buffer: List[str] = field(default_factory=list)
+    last_payload: Dict[str, Any] | None = None
+
+    def update(self, payload: Mapping[str, Any]) -> None:
+        self.last_payload = dict(payload)
+        call_id = payload.get("tool_call_id") or payload.get("id")
+        if call_id:
+            self.call_id = str(call_id)
+        sanitized = payload.get("function_name") or payload.get("sanitized_name") or payload.get("name")
+        if sanitized:
+            self.sanitized_name = str(sanitized)
+        internal = payload.get("tool_name") or payload.get("internal_name")
+        if internal:
+            self.internal_name = str(internal)
+        arguments = payload.get("arguments")
+        if isinstance(arguments, str) and arguments:
+            self.arguments_buffer.append(arguments)
+        elif isinstance(arguments, Mapping):
+            try:
+                self.arguments_buffer.append(json.dumps(arguments))
+            except (TypeError, ValueError):
+                pass
+
+    def arguments_text(self) -> str:
+        if self.arguments_buffer:
+            return "".join(self.arguments_buffer)
+        if self.last_payload is None:
+            return ""
+        arguments = self.last_payload.get("arguments")
+        if isinstance(arguments, str):
+            return arguments
+        if isinstance(arguments, Mapping):
+            try:
+                return json.dumps(arguments)
+            except (TypeError, ValueError):
+                return ""
+        return ""
+
+
+@dataclass(slots=True)
+class PendingToolCalls:
+    """Track all streaming tool call deltas for a turn."""
+
+    by_index: Dict[int, PendingFunctionCall] = field(default_factory=dict)
+    by_call_id: Dict[str, PendingFunctionCall] = field(default_factory=dict)
+    next_index: int = 0
+
+    def _ensure(self, index_hint: int | None, call_id: str | None) -> PendingFunctionCall:
+        candidate: PendingFunctionCall | None = None
+        if index_hint is not None and index_hint in self.by_index:
+            candidate = self.by_index[index_hint]
+        if candidate is None and call_id and call_id in self.by_call_id:
+            candidate = self.by_call_id[call_id]
+
+        if candidate is None:
+            idx = index_hint if index_hint is not None else self.next_index
+            candidate = PendingFunctionCall(index=idx)
+            if index_hint is None:
+                self.next_index += 1
+        else:
+            if index_hint is not None:
+                candidate.index = index_hint
+        return candidate
+
+    def upsert(self, payload: Mapping[str, Any]) -> PendingFunctionCall:
+        index_val = payload.get("index")
+        idx = int(index_val) if isinstance(index_val, int) else None
+        call_id_raw = payload.get("tool_call_id") or payload.get("id")
+        call_id = str(call_id_raw) if call_id_raw else None
+        entry = self._ensure(idx, call_id)
+        entry.update(payload)
+        self.by_index[entry.index] = entry
+        if call_id:
+            self.by_call_id[call_id] = entry
+        return entry
+
+    def to_plan(self, runtime: ToolRuntime, *, limit: Optional[int] = None) -> List[ToolCallPlanItem]:
+        ordered_indices = sorted(self.by_index)
+        if limit is not None:
+            ordered_indices = ordered_indices[: max(0, limit)]
+        plan: List[ToolCallPlanItem] = []
+        for idx in ordered_indices:
+            pending = self.by_index[idx]
+            call_id = pending.call_id or f"tool_call_{idx}"
+            sanitized = pending.sanitized_name or runtime.sanitized_names.get(pending.internal_name or "", "")
+            internal = pending.internal_name or runtime.name_reverse.get(sanitized or "", "")
+            if not internal and sanitized:
+                internal = runtime.name_reverse.get(sanitized, sanitized)
+            if not sanitized and internal:
+                sanitized = runtime.sanitized_names.get(internal, sanitize_tool_name(internal))
+            if not internal:
+                internal = sanitized or f"tool_{idx}"
+            if not sanitized:
+                sanitized = sanitize_tool_name(internal)
+
+            arguments_text = pending.arguments_text()
+            arguments = _parse_tool_arguments(arguments_text)
+            if not arguments_text:
+                try:
+                    arguments_text = json.dumps(arguments)
+                except (TypeError, ValueError):
+                    arguments_text = "{}"
+
+            plan.append(
+                ToolCallPlanItem(
+                    index=pending.index,
+                    call_id=call_id,
+                    sanitized_name=sanitized,
+                    internal_name=internal,
+                    arguments=arguments,
+                    arguments_json=arguments_text,
+                )
+            )
+        return plan
+
+    def clear(self) -> None:
+        self.by_index.clear()
+        self.by_call_id.clear()
+        self.next_index = 0
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience
+        return bool(self.by_index)
 
 
 def _runtime_context() -> Tuple[RuntimeContext | None, dict[str, str], Optional[TelemetryStreamer]]:
@@ -165,6 +312,14 @@ def _prepare_tool_runtime(
     parallelism_raw = tool_cfg.get("parallelism")
     parallelism = int(parallelism_raw) if isinstance(parallelism_raw, int) and parallelism_raw > 0 else 1
 
+    name_reverse: Dict[str, str] = {}
+    sanitized_names: Dict[str, str] = {}
+    if payload:
+        preview = build_chat_messages([], model="", stream=False, tools=[dict(tool) for tool in payload])
+        reverse_raw = preview.pop("_tool_name_reverse_map", {}) or {}
+        name_reverse = {str(k): str(v) for k, v in reverse_raw.items()}
+        sanitized_names = {str(v): str(k) for k, v in name_reverse.items()}
+
     runtime = ToolRuntime(
         specs=specs,
         payload=payload,
@@ -175,6 +330,8 @@ def _prepare_tool_runtime(
         redact=bool(tool_cfg.get("redactPII")),
         enabled=bool(payload) and can_use_tools(policy),
         mcp_servers=mcp_servers or {},
+        name_reverse=name_reverse,
+        sanitized_names=sanitized_names,
     )
     return runtime
 
@@ -418,15 +575,22 @@ async def _execute_tool_calls(
     semaphore = asyncio.Semaphore(max(1, runtime.parallelism))
     results: List[ToolResult | None] = [None] * len(calls)
 
-    async def _run(idx: int, call: ToolCall) -> tuple[int, ToolResult]:
+    async def _run(position: int, call: ToolCall) -> tuple[int, ToolResult]:
+        call_index = call.get("__index")
+        try:
+            index_value = int(call_index)
+        except (TypeError, ValueError):
+            index_value = position
+        call_payload = dict(call)
+        call_payload.pop("__index", None)
         async with semaphore:
-            result = await _execute_tool_call(call, runtime, telemetry, index=idx)
-        return idx, result
+            result = await _execute_tool_call(call_payload, runtime, telemetry, index=index_value)
+        return position, result
 
     tasks = [asyncio.create_task(_run(idx, call)) for idx, call in enumerate(calls)]
     for task in asyncio.as_completed(tasks):
-        idx, result = await task
-        results[idx] = result
+        position, result = await task
+        results[position] = result
     return [item for item in results if item is not None]
 
 
