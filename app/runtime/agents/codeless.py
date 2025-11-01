@@ -111,11 +111,19 @@ class PendingFunctionCall:
                     serialized = json.dumps(arguments)
                 except (TypeError, ValueError):
                     serialized = ""
+                # A mapping at done-time is authoritative; replace entirely.
                 self._replace_buffer(serialized)
             elif isinstance(arguments, str):
-                text = arguments.strip()
-                candidate = _last_balanced_json_object(text) or text
+                # Providers sometimes stream most of the payload via deltas and
+                # terminate with a tiny tail such as '"}' or '}'. Append the tail
+                # so we do not lose prior chunks, then trim to the final object.
+                tail = arguments
+                combined = self.arguments_buffer.getvalue() + (tail if tail else "")
+                candidate = _last_balanced_json_object(combined) or combined.strip()
                 self._replace_buffer(candidate)
+            else:
+                # No arguments supplied on .done; preserve what we already have.
+                pass
         else:
             if isinstance(arguments, str) and arguments:
                 self.arguments_buffer.write(arguments)
@@ -438,6 +446,7 @@ def _last_balanced_json_object(text: str) -> Optional[str]:
 
 
 def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
+    """Coerce raw tool arguments into a mapping, tolerating streaming artifacts."""
     if raw is None:
         return {}
     if isinstance(raw, Mapping):
@@ -449,6 +458,8 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
+            # Tolerate concatenated objects or partial tails by extracting the
+            # last balanced JSON object from the incoming text.
             candidate = _last_balanced_json_object(text)
             if not candidate:
                 return {}
