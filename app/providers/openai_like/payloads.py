@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
+from app.runtime.llm.message_builder import MessageBuilder
+
 Turn = dict[str, Any]
 SAFE_FN_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -96,14 +98,70 @@ def build_chat_messages(
 ) -> dict[str, Any]:
     """Return a Chat Completions-compatible payload."""
 
-    messages = []
-    for turn in _coerce_turns(turns):
+    normalized_turns = _coerce_turns(turns)
+    builder = MessageBuilder()
+
+    for turn in normalized_turns:
         role = str(turn.get("role") or "user")
-        message = dict(turn)
-        message["role"] = role
-        message.pop("input", None)
-        message.pop("messages", None)
-        messages.append(message)
+        if role == "system":
+            builder.with_system(turn.get("content") or "")
+            continue
+
+        if role == "user":
+            builder.add_user_text(turn.get("content"))
+            continue
+
+        if role == "assistant":
+            raw_tool_calls = turn.get("tool_calls")
+            if isinstance(raw_tool_calls, Iterable) and not isinstance(raw_tool_calls, (str, bytes, bytearray)):
+                calls: List[Dict[str, Any]] = []
+                for call in raw_tool_calls:
+                    if not isinstance(call, Mapping):
+                        continue
+                    function_block = call.get("function")
+                    if isinstance(function_block, Mapping):
+                        name = function_block.get("name")
+                        arguments = function_block.get("arguments")
+                    else:
+                        name = call.get("name")
+                        arguments = call.get("arguments")
+                    calls.append(
+                        {
+                            "id": call.get("id") or call.get("tool_call_id"),
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    )
+                if calls:
+                    builder.add_assistant_tool_calls(calls)
+                    continue
+
+            extras = {
+                key: value
+                for key, value in turn.items()
+                if key not in {"role", "content", "tool_calls", "input", "messages"}
+            }
+            builder.add_assistant_text(turn.get("content"), **extras)
+            continue
+
+        if role == "tool":
+            tool_call_id = str(turn.get("tool_call_id") or turn.get("id") or "")
+            name = str(turn.get("name") or "")
+            builder.add_tool_result(
+                tool_call_id=tool_call_id,
+                name=name,
+                result=turn.get("content"),
+            )
+            continue
+
+        message = {
+            key: value
+            for key, value in turn.items()
+            if key not in {"input", "messages"}
+        }
+        builder.add_raw_message(message)
+
+    messages = builder.build()
 
     extras = dict(params)
     max_output = extras.pop("max_output_tokens", None)

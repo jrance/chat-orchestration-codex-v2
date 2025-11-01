@@ -262,9 +262,27 @@ def _coerce_text(value: Any) -> str:
 def _coerce_message(message: Mapping[str, Any]) -> Dict[str, Any]:
     role = str(message.get("role") or "user")
     content = message.get("content")
+    coerced: Dict[str, Any] = {"role": role}
     if isinstance(content, list):
-        return {"role": role, "content": content}
-    return {"role": role, "content": _coerce_text(content)}
+        coerced["content"] = [item for item in content]
+    else:
+        coerced["content"] = _coerce_text(content)
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        coerced["tool_calls"] = [
+            dict(call) if isinstance(call, Mapping) else call for call in tool_calls
+        ]
+    tool_call_id = message.get("tool_call_id")
+    if tool_call_id is not None:
+        coerced["tool_call_id"] = tool_call_id
+    name = message.get("name")
+    if name is not None:
+        coerced["name"] = name
+    message_id = message.get("id")
+    if message_id is not None:
+        coerced["id"] = message_id
+    return coerced
 
 
 def _history_messages(state: OrchestratorState, history_cfg: Mapping[str, Any]) -> Messages:
@@ -516,9 +534,10 @@ def _tool_result_payload(call: ToolCall, output: Dict[str, Any] | str | Any) -> 
         normalized_output = output
     else:
         normalized_output = {"value": output}
+    name_value = call.get("__sanitized_name") or call.get("name") or ""
     payload = ToolResultPayload(
         id=str(call.get("id") or ""),
-        name=str(call.get("name") or ""),
+        name=str(name_value),
         output=normalized_output,
     )
     return payload.model_dump()
@@ -712,12 +731,13 @@ async def _execute_tool_calls(
     return [item for item in results if item is not None]
 
 
-def _append_tool_messages(target: List[Dict[str, Any]], results: Iterable[ToolResult]) -> None:
+def _tool_result_messages(results: Iterable[ToolResult]) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
     for result in results:
         serialized = result.get("output")
         if not isinstance(serialized, str):
             serialized = json.dumps(serialized, ensure_ascii=False)
-        target.append(
+        messages.append(
             {
                 "role": "tool",
                 "tool_call_id": result.get("id"),
@@ -725,6 +745,56 @@ def _append_tool_messages(target: List[Dict[str, Any]], results: Iterable[ToolRe
                 "content": serialized,
             }
         )
+    return messages
+
+
+def _append_tool_messages(target: List[Dict[str, Any]], results: Iterable[ToolResult]) -> None:
+    target.extend(_tool_result_messages(results))
+
+
+def _assistant_tool_call_message(
+    calls: Sequence[ToolCall],
+    runtime: ToolRuntime,
+) -> Dict[str, Any] | None:
+    entries: List[Dict[str, Any]] = []
+    for index, call in enumerate(calls):
+        raw_name = str(call.get("name") or "")
+        internal_name = runtime.name_reverse.get(raw_name, raw_name)
+        if not internal_name:
+            internal_name = raw_name or f"tool_{index}"
+        sanitized_name = runtime.sanitized_names.get(internal_name, sanitize_tool_name(internal_name))
+
+        call_id = str(call.get("id") or f"{sanitized_name}_{index}")
+        call["id"] = call_id
+        call["__sanitized_name"] = sanitized_name
+        call["name"] = internal_name
+
+        arguments = call.get("arguments") or {}
+        if isinstance(arguments, str):
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = {}
+        else:
+            parsed_arguments = dict(arguments)
+        call["arguments"] = parsed_arguments
+
+        try:
+            arguments_text = json.dumps(parsed_arguments, ensure_ascii=False)
+        except (TypeError, ValueError):
+            arguments_text = "{}"
+
+        entries.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": sanitized_name, "arguments": arguments_text},
+            }
+        )
+
+    if not entries:
+        return None
+    return {"role": "assistant", "content": "", "tool_calls": entries}
 
 
 def _build_request(
@@ -894,6 +964,7 @@ async def invoke_llm(
     response = await _invoke_with_repairs(body, headers=headers, max_repairs=max_repairs, telemetry=telemetry)
 
     tool_results: List[ToolResult] = []
+    history_messages: List[Dict[str, Any]] = []
     calls_used = 0
 
     while tool_runtime.enabled:
@@ -910,12 +981,19 @@ async def invoke_llm(
         if not tool_calls:
             break
 
+        assistant_call_message = _assistant_tool_call_message(tool_calls, tool_runtime)
+        if assistant_call_message:
+            conversation.append(assistant_call_message)
+            history_messages.append(assistant_call_message)
+
         executed = await _execute_tool_calls(tool_calls, tool_runtime, telemetry if runtime_ctx else None)
         if not executed:
             break
 
         tool_results.extend(executed)
-        _append_tool_messages(conversation, executed)
+        tool_messages = _tool_result_messages(executed)
+        conversation.extend(tool_messages)
+        history_messages.extend(tool_messages)
         calls_used += len(executed)
 
         body, _messages, _response_format, _ = _build_request(
@@ -934,10 +1012,10 @@ async def invoke_llm(
     output_text = _extract_output_text(response)
     usage = _extract_usage(response)
     state_for_update = state
-    if tool_results:
+    if history_messages:
         state_for_update = copy.deepcopy(state)
         state_messages = list(state_for_update.get("messages") or [])
-        _append_tool_messages(state_messages, tool_results)
+        state_messages.extend(history_messages)
         state_for_update["messages"] = state_messages
 
     new_state = _append_assistant_message_with_metadata(state_for_update, agent_node, output_text, response, usage)
