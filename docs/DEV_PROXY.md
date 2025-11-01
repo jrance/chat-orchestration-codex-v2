@@ -20,6 +20,10 @@ PROXY_CA_BUNDLE=-----BEGIN CERTIFICATE-----
 
 When the proxy bundle is omitted, the runtime falls back to the system trust store (`verify=True`). When present, the bundle is loaded into an `ssl.SSLContext` that is shared by the token and gateway clients.
 
+## httpx compatibility
+
+httpx 0.28 removed the long-standing `proxies=` keyword in favour of `proxy=` (or proxy-aware transports). The engine inspects the available parameters on `httpx.AsyncClient` at runtime and automatically chooses the correct wiring, falling back to an `AsyncHTTPTransport(proxy=...)` when neither keyword is available. No additional configuration is required when upgrading httpx.
+
 ## Exporting the Fiddler certificate
 
 1. Open Fiddler and ensure HTTPS decryption is enabled.

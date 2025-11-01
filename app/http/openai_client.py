@@ -136,7 +136,7 @@ class OpenAICompatibleClient:
 
     async def post_responses(self, body: dict[str, Any], **headers: Any) -> dict[str, Any]:
         """Convenience helper for POST /responses."""
-        response = await self.request("POST", "/v1/responses", json_body=body, **headers)
+        response = await self.request("POST", "/v1/chat/completions", json_body=body, **headers)
         return response.json()
 
     async def post_responses_stream(
@@ -169,7 +169,7 @@ class OpenAICompatibleClient:
                 )
                 async with client.stream(
                     "POST",
-                    "/v1/responses",
+                    "/v1/chat/completions",
                     json=body,
                     headers=headers,
                 ) as response:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from functools import lru_cache
+from typing import Any, Mapping
 
 import httpx
 
@@ -14,11 +16,48 @@ _gateway_client: httpx.AsyncClient | None = None
 _token_client: httpx.AsyncClient | None = None
 
 
+@lru_cache(maxsize=1)
+def _async_client_parameters() -> Mapping[str, inspect.Parameter]:
+    try:
+        return inspect.signature(httpx.AsyncClient.__init__).parameters
+    except Exception:
+        return {}
+
+
+def _preferred_proxy_argument() -> str:
+    params = _async_client_parameters()
+    if "proxies" in params:
+        return "proxies"
+    if "proxy" in params:
+        return "proxy"
+    return "transport"
+
+
+def _proxy_url_from_mapping(proxies: Mapping[str, str] | None) -> str | None:
+    if not proxies:
+        return None
+    for key in ("all", "https", "http"):
+        value = proxies.get(key)
+        if value:
+            return value
+    return None
+
+
 def _apply_proxy_kwargs(kwargs: dict[str, Any]) -> None:
     if kwargs.get("transport") is None:
         proxies = build_httpx_proxies()
         if proxies:
-            kwargs["proxies"] = proxies
+            url = _proxy_url_from_mapping(proxies)
+            mode = _preferred_proxy_argument()
+            if mode == "proxies":
+                kwargs["proxies"] = proxies
+            elif mode == "proxy" and url:
+                kwargs["proxy"] = url
+            elif mode == "transport" and url:
+                try:
+                    kwargs["transport"] = httpx.AsyncHTTPTransport(proxy=url)
+                except Exception:
+                    pass
     verify = build_ssl_verify()
     kwargs["verify"] = verify
     kwargs["trust_env"] = False
