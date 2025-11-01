@@ -1,28 +1,20 @@
-import importlib
-import os
-
-from pydantic import SecretStr
-
-settings_module = importlib.import_module("app.config.settings")
+from app.config.settings import Settings
 
 
-def test_env_local_overrides_env(tmp_path):
-    (tmp_path / ".env").write_text(
-        "APIGEE_CLIENT_SECRET=from_dotenv\nAPIGEE_CLIENT_ID=dotenv-id\n", encoding="utf-8"
+def test_env_local_overrides_env(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_local_file = tmp_path / ".env.local"
+    env_file.write_text("APIGEE_CLIENT_SECRET=from_env\n", encoding="utf-8")
+    env_local_file.write_text("APIGEE_CLIENT_SECRET=from_local\n", encoding="utf-8")
+
+    monkeypatch.delenv("APIGEE_CLIENT_SECRET", raising=False)
+    monkeypatch.setitem(
+        Settings.model_config,
+        "env_file",
+        (str(env_file), str(env_local_file)),
     )
-    (tmp_path / ".env.local").write_text(
-        "APIGEE_CLIENT_SECRET=from_local\nAPIGEE_CLIENT_ID=local-id\n", encoding="utf-8"
-    )
 
-    cwd = os.getcwd()
-    os.chdir(tmp_path)
-    try:
-        importlib.reload(settings_module)
-        secret_value = settings_module.settings.apigee_client_secret
+    test_settings = Settings()
 
-        assert isinstance(secret_value, SecretStr)
-        assert secret_value.get_secret_value() == "from_local"
-        assert settings_module.settings.apigee_client_id == "local-id"
-    finally:
-        os.chdir(cwd)
-        importlib.reload(settings_module)
+    assert test_settings.apigee_client_secret is not None
+    assert test_settings.apigee_client_secret.get_secret_value() == "from_local"

@@ -18,6 +18,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
 
     configure_logging(level=settings.log_level, redact=settings.log_redaction_enabled)
+    log.debug("settings: %s", settings.debug_summary())
 
     app = FastAPI(
         title=settings.app_name,

@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     log_redaction_enabled: bool = False
 
     # Apigee / OpenAI-compatible gateway
-    apigee_token_url: str | None = Field(default=None, validation_alias="APIGEE_TOKEN_URL")
-    apigee_client_id: str | None = Field(default=None, validation_alias="APIGEE_CLIENT_ID")
+    apigee_token_url: str | None = Field(default=None, alias="APIGEE_TOKEN_URL")
+    apigee_client_id: str | None = Field(default=None, alias="APIGEE_CLIENT_ID")
     apigee_client_secret: SecretStr | None = Field(
-        default=None, validation_alias="APIGEE_CLIENT_SECRET"
+        default=None, alias="APIGEE_CLIENT_SECRET"
     )
     apigee_audience: str | None = None
     apigee_scopes: str = "openid"
@@ -103,6 +103,19 @@ class Settings(BaseSettings):
             self.http_retry_max_attempts = int(self.http_max_retries)
         if "http_retry_base_delay" not in fields_set:
             self.http_retry_base_delay = float(self.http_retry_backoff_ms) / 1000.0
+
+    def debug_summary(self) -> str:
+        """Return a safe summary describing which env files and keys were loaded."""
+        env_files = self.model_config.get("env_file") or ()
+        files = ", ".join(str(path) for path in env_files)
+        keys: list[str] = []
+        if self.apigee_client_id:
+            keys.append("APIGEE_CLIENT_ID")
+        if self.apigee_token_url:
+            keys.append("APIGEE_TOKEN_URL")
+        if self.apigee_client_secret is not None:
+            keys.append("APIGEE_CLIENT_SECRET")
+        return f"env_files=[{files}] loaded_keys={keys}"
 
     def apigee_extra_headers(self) -> dict[str, Any]:
         """Return configured static headers to include with every Apigee call."""

@@ -66,6 +66,7 @@ class ApigeeTokenProvider:
             else:
                 client_secret = client_secret_setting
 
+            settings.debug_summary()
             if not token_url or not client_id or not client_secret:
                 raise RuntimeError(
                     "Apigee token configuration missing (APIGEE_TOKEN_URL/CLIENT_ID/CLIENT_SECRET).",
