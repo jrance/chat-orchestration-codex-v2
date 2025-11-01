@@ -95,8 +95,6 @@ class PendingFunctionCall:
             self.internal_name = str(internal)
         arguments = payload.get("arguments")
         if isinstance(arguments, str) and arguments:
-            if is_done_event:
-                self.arguments_buffer = StringIO()
             self.arguments_buffer.write(arguments)
         elif isinstance(arguments, Mapping):
             try:
@@ -104,8 +102,6 @@ class PendingFunctionCall:
             except (TypeError, ValueError):
                 serialized = ""
             if serialized:
-                if is_done_event:
-                    self.arguments_buffer = StringIO()
                 self.arguments_buffer.write(serialized)
 
     def arguments_text(self) -> str:
@@ -132,6 +128,7 @@ class PendingToolCalls:
     by_index: Dict[int, PendingFunctionCall] = field(default_factory=dict)
     by_call_id: Dict[str, PendingFunctionCall] = field(default_factory=dict)
     next_index: int = 0
+    _last_active: Optional[PendingFunctionCall] = None
 
     def _ensure(self, index_hint: int | None, call_id: str | None) -> PendingFunctionCall:
         candidate: PendingFunctionCall | None = None
@@ -139,6 +136,15 @@ class PendingToolCalls:
             candidate = self.by_index[index_hint]
         if candidate is None and call_id and call_id in self.by_call_id:
             candidate = self.by_call_id[call_id]
+
+        if candidate is None and index_hint is None and not call_id:
+            if self._last_active is not None:
+                candidate = self._last_active
+            elif len(self.by_index) == 1:
+                candidate = next(iter(self.by_index.values()))
+            elif self.by_index:
+                max_idx = max(self.by_index.keys())
+                candidate = self.by_index[max_idx]
 
         if candidate is None:
             idx = index_hint if index_hint is not None else self.next_index
@@ -160,6 +166,7 @@ class PendingToolCalls:
         self.by_index[entry.index] = entry
         if call_id:
             self.by_call_id[call_id] = entry
+        self._last_active = entry
         return entry
 
     def to_plan(self, runtime: ToolRuntime, *, limit: Optional[int] = None, turn_finished: bool = False) -> List[ToolCallPlanItem]:
