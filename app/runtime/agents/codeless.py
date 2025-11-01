@@ -77,13 +77,24 @@ class PendingFunctionCall:
     arguments_buffer: StringIO = field(default_factory=StringIO)
     last_payload: Dict[str, Any] | None = None
     completed: bool = False
+    _saw_delta: bool = False
+    _saw_done: bool = False
+
+    def _replace_buffer(self, text: str) -> None:
+        self.arguments_buffer = StringIO()
+        if text:
+            self.arguments_buffer.write(text)
 
     def update(self, payload: Mapping[str, Any]) -> None:
         self.last_payload = dict(payload)
         event_type = str(payload.get("type") or "")
         is_done_event = event_type.endswith(".done")
+        is_delta_event = event_type.endswith(".delta")
         if is_done_event:
             self.completed = True
+            self._saw_done = True
+        elif is_delta_event:
+            self._saw_delta = True
         call_id = payload.get("tool_call_id") or payload.get("id")
         if call_id:
             self.call_id = str(call_id)
@@ -94,15 +105,20 @@ class PendingFunctionCall:
         if internal:
             self.internal_name = str(internal)
         arguments = payload.get("arguments")
-        if isinstance(arguments, str) and arguments:
-            self.arguments_buffer.write(arguments)
-        elif isinstance(arguments, Mapping):
-            try:
-                serialized = json.dumps(arguments)
-            except (TypeError, ValueError):
-                serialized = ""
-            if serialized:
-                self.arguments_buffer.write(serialized)
+        if is_done_event:
+            if isinstance(arguments, Mapping):
+                try:
+                    serialized = json.dumps(arguments)
+                except (TypeError, ValueError):
+                    serialized = ""
+                self._replace_buffer(serialized)
+            elif isinstance(arguments, str):
+                text = arguments.strip()
+                candidate = _last_balanced_json_object(text) or text
+                self._replace_buffer(candidate)
+        else:
+            if isinstance(arguments, str) and arguments:
+                self.arguments_buffer.write(arguments)
 
     def arguments_text(self) -> str:
         text = self.arguments_buffer.getvalue()
@@ -389,6 +405,38 @@ def _appears_complete_json(text: str) -> bool:
     return depth == 0 and not in_string
 
 
+def _last_balanced_json_object(text: str) -> Optional[str]:
+    """Return the final balanced JSON object substring within text."""
+    start: Optional[int] = None
+    depth = 0
+    escaped = False
+    in_string = False
+    last_obj: Optional[str] = None
+    for idx, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    last_obj = text[start : idx + 1]
+                    start = None
+    return last_obj
+
+
 def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
     if raw is None:
         return {}
@@ -401,7 +449,13 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            return {}
+            candidate = _last_balanced_json_object(text)
+            if not candidate:
+                return {}
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                return {}
         if isinstance(parsed, Mapping):
             return dict(parsed)
         return {}
