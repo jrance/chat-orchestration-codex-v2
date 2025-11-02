@@ -16,8 +16,9 @@ with OAuth bearer tokens fetched from Apigee.
 | `HTTP_MAX_RETRIES` / `HTTP_RETRY_BACKOFF_MS` | Retry/backoff tuning |
 
 All API calls propagate the execution headers provided by the FastAPI layer:
-`X-Tenant-Id`, `X-Correlation-Id`, `X-Request-Id`, `X-Timestamp`,
-`X-Client-Id`, and `X-Telemetry`.
+`X-Tenant-Id`, `X-Correlation-Id`, `X-Request-Id`, `X-Timestamp`, and
+`X-Client-Id`. Telemetry headers configure the server stream only and are not
+forwarded to the gateway.
 
 ## Endpoints
 
@@ -46,10 +47,11 @@ retry/repair responses up to the configured `maxRepairAttempts`.
 ### `POST /v1/responses` (streaming)
 
 Calling `post_responses_stream()` yields individual SSE frames. Events are
-forwarded verbatim, expecting OpenAI-style types such as:
+normalized to the canonical Responses namespace, including tool-call updates:
 
 * `response.created`
 * `response.output_text.delta`
+* `response.tool_call.arguments.delta`
 * `response.completed`
 
 The runtime injects `run_id` / `thread_id` metadata before exposing the events
@@ -58,10 +60,8 @@ token updates and final usage accounting.
 
 ## Telemetry
 
-LLM invocations publish telemetry envelopes via `TelemetryStreamer`:
-
-* `telemetry.llm.request` – before issuing HTTP requests
-* `telemetry.llm.response` – after receiving responses (including streaming)
-
-Payloads are automatically redacted when log redaction is enabled or when a
-request opts into redaction.
+LLM invocations publish telemetry envelopes via the runtime `TelemetryEmitter`.
+The request is captured immediately before issuing HTTP calls and the response
+after the stream completes, including latency, token usage, and sanitized
+payload previews. Redaction is controlled by `TELEMETRY_REDACTION` /
+`X-Telemetry-Redact`. See `docs/TELEMETRY.md` for the full event catalog.

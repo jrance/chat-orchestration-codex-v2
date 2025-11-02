@@ -96,6 +96,18 @@ class Settings(BaseSettings):
         alias="PARALLEL_TOOL_CALLS_ENABLED",
     )
 
+    # Telemetry defaults (PR-031)
+    telemetry_enabled: bool = Field(default=True, alias="TELEMETRY_ENABLED")
+    telemetry_level: str = Field(default="basic", alias="TELEMETRY_LEVEL")
+    telemetry_redaction: str = Field(default="safe", alias="TELEMETRY_REDACTION")
+    telemetry_payload_max_chars: int = Field(
+        default=8192, alias="TELEMETRY_PAYLOAD_MAX_CHARS"
+    )
+    tool_result_max_chars: int = Field(default=4096, alias="TOOL_RESULT_MAX_CHARS")
+    responses_heartbeat_interval_ms: int = Field(
+        default=15000, alias="RESPONSES_HEARTBEAT_INTERVAL_MS"
+    )
+
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",

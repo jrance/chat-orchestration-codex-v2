@@ -17,6 +17,7 @@ from app.mcp import call_mcp_tool, register_server
 from app.providers.openai_like import create_response, stream_response
 from app.providers.openai_like.payloads import build_chat_messages, sanitize_tool_name
 from app.runtime.context import RuntimeContext, get_runtime_context
+from app.telemetry.emitter import TelemetryEmitter
 from app.telemetry.models import TelemetryEvent
 from app.telemetry.streamer import TelemetryStreamer
 from app.tools import filter_schema_visible, invoke_tool, register_tool
@@ -1043,24 +1044,59 @@ async def stream_codeless(
     )
     body["stream"] = True
 
-    if telemetry:
-        await telemetry.publish(
-            TelemetryEvent(
-                event="telemetry.llm.request",
-                payload={"model": body.get("model"), "stream": True},
-            )
+    telemetry_policy = runtime.execution.telemetry if runtime and runtime.execution else None
+    emitter = TelemetryEmitter(telemetry, telemetry_policy)
+
+    model_cfg = (agent_node.get("data") or {}).get("model") or {}
+    provider_name = str(model_cfg.get("provider") or "openai")
+    model_name = str(model_cfg.get("modelId") or model_cfg.get("name") or body.get("model") or "")
+    request_id = headers.get("X-Request-Id") if isinstance(headers, Mapping) else None
+    request_started = time.perf_counter()
+
+    if emitter.enabled():
+        await emitter.emit_llm_request(
+            provider=provider_name,
+            model=model_name,
+            endpoint="/v1/responses",
+            headers=headers or {},
+            body=body,
+            request_id=request_id,
         )
 
-    async for event in stream_response(body, context_headers=headers):
-        yield event
+    usage_snapshot: Dict[str, int] = {}
+    tool_calls_preview: Any = None
+    response_snapshot: Any = None
+    error: Exception | None = None
 
-    if telemetry:
-        await telemetry.publish(
-            TelemetryEvent(
-                event="telemetry.llm.response",
-                payload={"model": body.get("model"), "stream": True},
+    try:
+        async for event in stream_response(body, context_headers=headers):
+            event_type = str(event.get("type") or "")
+            if event_type == "response.completed":
+                response_snapshot = event
+                usage_candidate = event.get("usage") or (event.get("response") or {}).get("usage")
+                if isinstance(usage_candidate, Mapping):
+                    usage_snapshot = {str(k): int(v) for k, v in usage_candidate.items() if isinstance(v, (int, float))}
+                tool_calls_candidate = event.get("tool_calls") or (event.get("response") or {}).get("tool_calls")
+                if tool_calls_candidate is not None:
+                    tool_calls_preview = tool_calls_candidate
+            yield event
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        if emitter.enabled():
+            latency_ms = (time.perf_counter() - request_started) * 1000.0
+            status_code = 200 if error is None else 500
+            await emitter.emit_llm_response(
+                provider=provider_name,
+                model=model_name,
+                request_id=request_id,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                body=response_snapshot or {},
+                usage=usage_snapshot,
+                tool_calls=tool_calls_preview,
             )
-        )
 
 
 def build_codeless_runner(

@@ -9,8 +9,12 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse, Response
 
-from app.api.deps import ExecutionContext, ensure_tenant_matches, parse_execution_headers
-from app.api.models import TelemetryLevel
+from app.api.deps import (
+    ExecutionContext,
+    build_telemetry_context,
+    ensure_tenant_matches,
+    parse_execution_headers,
+)
 from app.api.schemas import RunRequest, RunStatus, ResumeRequest
 from app.config.settings import settings
 from app.ir.loader import build_runtime_plan
@@ -49,13 +53,15 @@ async def _create_context(
     if req.thread_id:
         context.thread_id = req.thread_id
     context.ensure_run_ids()
+    context.telemetry = build_telemetry_context(headers)
 
     telemetry: Optional[TelemetryStreamer] = None
-    if headers.telemetry is not TelemetryLevel.NONE:
+    if context.telemetry and context.telemetry.enabled:
         config = TelemetryStreamConfig(
             run_id=context.run_id or "",
-            level=headers.telemetry,
-            redact=settings.log_redaction_enabled,
+            level=context.telemetry.level,
+            redaction=context.telemetry.redaction,
+            payload_max_chars=context.telemetry.payload_max_chars,
         )
         telemetry = TelemetryStreamer(config)
         await register_streamer(telemetry)
@@ -188,8 +194,11 @@ async def execute_stream(request: Request, req: RunRequest) -> StreamingResponse
         headers["X-Telemetry-Stream-Url"] = f"/v1/telemetry/stream?runId={context.run_id}"
 
     iterator = _stream_response_events(req, context, telemetry)
+    heartbeat_seconds = max(
+        0.0, float(getattr(settings, "responses_heartbeat_interval_ms", 1000)) / 1000.0
+    )
     return StreamingResponse(
-        message_stream(iterator, heartbeat_interval=10.0),
+        message_stream(iterator, heartbeat_interval=heartbeat_seconds),
         media_type="text/event-stream",
         headers=headers,
     )
@@ -264,8 +273,11 @@ async def telemetry_stream(request: Request, runId: str) -> StreamingResponse:
             yield SSEMessage(event=event.event, data=event.payload)
         await pop_streamer(runId)
 
+    heartbeat_seconds = max(
+        0.0, float(getattr(settings, "responses_heartbeat_interval_ms", 1000)) / 1000.0
+    )
     return StreamingResponse(
-        message_stream(iterator(), heartbeat_interval=10.0),
+        message_stream(iterator(), heartbeat_interval=heartbeat_seconds),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )

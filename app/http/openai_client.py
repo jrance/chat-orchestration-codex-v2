@@ -355,7 +355,7 @@ async def _chat_stream_as_responses(
                                     "function_name": state.get("sanitized"),
                                     "index": state.get("index"),
                                 }
-                                yield "event: response.function_call_arguments.delta"
+                                yield "event: response.tool_call.arguments.delta"
                                 yield f"data: {json.dumps(payload_obj)}"
                                 yield ""
                             elif isinstance(arguments, Mapping):
@@ -368,7 +368,7 @@ async def _chat_stream_as_responses(
                                     "function_name": state.get("sanitized"),
                                     "index": state.get("index"),
                                 }
-                                yield "event: response.function_call_arguments.delta"
+                                yield "event: response.tool_call.arguments.delta"
                                 yield f"data: {json.dumps(payload_obj)}"
                                 yield ""
 
@@ -388,7 +388,7 @@ async def _chat_stream_as_responses(
         arguments_text = "".join(entry.get("chunks") or [])
         if arguments_text:
             payload_obj["arguments"] = arguments_text
-        yield "event: response.function_call_arguments.done"
+        yield "event: response.tool_call.arguments.done"
         yield f"data: {json.dumps(payload_obj)}"
         yield ""
 
@@ -484,10 +484,9 @@ class OpenAICompatibleClient:
         tenant_id: Optional[str],
         correlation_id: Optional[str],
         request_id: Optional[str],
-        telemetry: Optional[str],
         extra_headers: dict[str, str] | None,
     ) -> dict[str, str]:
-        headers = build_default_headers(tenant_id, correlation_id, request_id, telemetry)
+        headers = build_default_headers(tenant_id, correlation_id, request_id)
         headers.update(await self._auth_headers())
         if extra_headers:
             headers.update(extra_headers)
@@ -501,7 +500,6 @@ class OpenAICompatibleClient:
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
         request_id: Optional[str] = None,
-        telemetry: Optional[str] = None,
         extra_headers: dict[str, str] | None = None,
         max_attempts: Optional[int] = None,
     ) -> httpx.Response:
@@ -519,7 +517,6 @@ class OpenAICompatibleClient:
                     tenant_id,
                     correlation_id,
                     request_id,
-                    telemetry,
                     extra_headers,
                 )
                 response = await client.request(method, path, json=json_body, headers=headers)
@@ -546,14 +543,32 @@ class OpenAICompatibleClient:
             raise last_error
         raise RuntimeError("request failed without raising an exception")  # pragma: no cover
 
-    async def post_responses(self, body: dict[str, Any], **headers: Any) -> dict[str, Any]:
+    async def post_responses(
+        self,
+        body: dict[str, Any],
+        *,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        extra_headers: dict[str, str] | None = None,
+        max_attempts: Optional[int] = None,
+    ) -> dict[str, Any]:
         """Convenience helper for POST /responses."""
         style = _configured_style()
         payload = _build_payload(body, style=style)
         tool_reverse = payload.pop("_tool_name_reverse_map", None)
         path = _endpoint_for_style(style)
         try:
-            response = await self.request("POST", path, json_body=payload, **headers)
+            response = await self.request(
+                "POST",
+                path,
+                json_body=payload,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                extra_headers=extra_headers,
+                max_attempts=max_attempts,
+            )
             data = response.json()
             return data if style == _RESPONSES_STYLE else _chat_response_to_responses(data, tool_reverse)
         except httpx.HTTPStatusError as exc:
@@ -569,7 +584,16 @@ class OpenAICompatibleClient:
                     fallback_path,
                     message,
                 )
-                response = await self.request("POST", fallback_path, json_body=fallback_payload, **headers)
+                response = await self.request(
+                    "POST",
+                    fallback_path,
+                    json_body=fallback_payload,
+                    tenant_id=tenant_id,
+                    correlation_id=correlation_id,
+                    request_id=request_id,
+                    extra_headers=extra_headers,
+                    max_attempts=max_attempts,
+                )
                 data = response.json()
                 return _chat_response_to_responses(data, tool_reverse)
             raise
@@ -581,7 +605,6 @@ class OpenAICompatibleClient:
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
         request_id: Optional[str] = None,
-        telemetry: Optional[str] = None,
         extra_headers: dict[str, str] | None = None,
         max_attempts: Optional[int] = None,
     ) -> AsyncIterator[str]:
@@ -601,7 +624,6 @@ class OpenAICompatibleClient:
                 tenant_id,
                 correlation_id,
                 request_id,
-                telemetry,
                 extra_headers,
             )
             path = _endpoint_for_style(style)

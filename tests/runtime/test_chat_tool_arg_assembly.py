@@ -90,7 +90,7 @@ async def test_fragmented_tool_arguments_are_buffered(monkeypatch: pytest.Monkey
         yield {"type": "response.created"}
         for piece in fragments:
             yield {
-                "type": "response.function_call_arguments.delta",
+                "type": "response.tool_call.arguments.delta",
                 "tool_call_id": "call_X",
                 "name": "tool:ddgs.search",
                 "function_name": "tool_ddgs_search",
@@ -98,7 +98,7 @@ async def test_fragmented_tool_arguments_are_buffered(monkeypatch: pytest.Monkey
                 "index": 0,
             }
         yield {
-            "type": "response.function_call_arguments.done",
+            "type": "response.tool_call.arguments.done",
             "tool_call_id": "call_X",
             "name": "tool:ddgs.search",
             "function_name": "tool_ddgs_search",

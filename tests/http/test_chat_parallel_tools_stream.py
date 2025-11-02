@@ -63,7 +63,7 @@ async def test_chat_stream_emits_indexed_tool_calls():
             payload = json.loads(line.split("data: ", 1)[1])
             frames.append((current_event, payload))
 
-    deltas = [payload for event, payload in frames if event == "response.function_call_arguments.delta"]
+    deltas = [payload for event, payload in frames if event == "response.tool_call.arguments.delta"]
     assert len(deltas) == 2
     assert deltas[0]["index"] == 0
     assert deltas[1]["index"] == 1
@@ -74,7 +74,7 @@ async def test_chat_stream_emits_indexed_tool_calls():
     assert deltas[0]["tool_call_id"] == "call_0"
     assert deltas[1]["tool_call_id"] == "call_1"
 
-    done_events = [payload for event, payload in frames if event == "response.function_call_arguments.done"]
+    done_events = [payload for event, payload in frames if event == "response.tool_call.arguments.done"]
     assert len(done_events) == 2
     assert done_events[0]["index"] == 0
     assert done_events[1]["index"] == 1

@@ -99,7 +99,6 @@ async def test_post_responses_success(monkeypatch: pytest.MonkeyPatch) -> None:
             tenant_id="tenant",
             correlation_id="corr",
             request_id="req",
-            telemetry="basic",
         )
     finally:
         await client.aclose()
@@ -111,7 +110,7 @@ async def test_post_responses_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert request.headers["X-Correlation-Id"] == "corr"
     assert request.headers["X-Request-Id"] == "req"
     assert request.headers["X-Tenant-Id"] == "tenant"
-    assert request.headers["X-Telemetry"] == "basic"
+    assert "X-Telemetry" not in request.headers
 
 
 @pytest.mark.anyio

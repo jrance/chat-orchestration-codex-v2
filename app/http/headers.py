@@ -13,7 +13,6 @@ H_REQUEST_ID = "X-Request-Id"
 H_TIMESTAMP = "X-Timestamp"
 H_TENANT_ID = "X-Tenant-Id"
 H_CLIENT_ID = "X-Client-Id"
-H_TELEMETRY = "X-Telemetry"
 
 
 def _utc_timestamp() -> str:
@@ -29,7 +28,6 @@ def build_default_headers(
     tenant_id: Optional[str],
     correlation_id: Optional[str],
     request_id: Optional[str],
-    telemetry: Optional[str] = None,
 ) -> dict[str, str]:
     """Build the core headers expected by the Apigee gateway."""
     headers: dict[str, str] = {
@@ -46,11 +44,11 @@ def build_default_headers(
         headers[H_TENANT_ID] = tenant_id
     if settings.apigee_client_id:
         headers[H_CLIENT_ID] = settings.apigee_client_id
-    if telemetry:
-        headers[H_TELEMETRY] = telemetry
 
     # Merge optional static headers from configuration without clobbering explicit inputs.
     for key, value in settings.apigee_extra_headers().items():
+        if key.lower() == "x-telemetry":
+            continue
         headers.setdefault(key, str(value))
 
     return headers

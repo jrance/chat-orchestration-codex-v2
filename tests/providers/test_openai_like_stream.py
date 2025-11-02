@@ -39,6 +39,8 @@ async def test_create_response_uses_headers():
     call = client.calls[0]
     assert call[0] == "sync"
     assert call[2]["tenant_id"] == "tenant"
+    assert "telemetry" not in call[2]
+    assert "X-Telemetry" not in call[2]["extra_headers"]
     assert call[2]["extra_headers"]["X-Custom"] == "value"
 
 

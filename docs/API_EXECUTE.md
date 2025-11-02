@@ -10,9 +10,10 @@ All endpoints require the following headers:
 - `X-Correlation-Id`, `X-Request-Id` *(optional)* – Request tracing identifiers; generated when omitted.
 - `X-Timestamp` *(optional)* – RFC3339 timestamp; defaults to current UTC time.
 - `X-Client-Id` *(optional)* – Downstream client identifier.
-- `X-Telemetry` *(optional)* – `none` (default), `basic`, or `verbose`. Enables telemetry streaming when not `none`.
+- `X-Telemetry` *(optional)* - `none` (default), `basic`, `verbose`, or `trace`. Enables telemetry streaming when not `none`.
+- `X-Telemetry-Redact` *(optional)* - `safe` (default), `full`, or `none`. Controls payload redaction for telemetry events.
 
-Additional headers prefixed with `X-Extra-` are forwarded to downstream HTTP calls.
+Telemetry headers configure the server-side telemetry stream only; they are not forwarded to LLM providers or tools. Additional headers prefixed with `X-Extra-` are forwarded to downstream HTTP calls.
 
 ## POST /v1/execute
 
@@ -60,11 +61,14 @@ data: {"run_id":"run_123","status":"in_progress"}
 event: response.output_text.delta
 data: {"delta":"stub ","role":"assistant"}
 
+event: response.tool_call.arguments.delta
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","arguments":"{\"query\":\"stub\"}"}
+
 event: response.completed
-data: {"run_id":"run_123","output_text":"stub response","usage":{"output_tokens":2}}
+data: {"run_id":"run_123","output_text":"stub response","usage":{"output_tokens":2},"tool_calls":[{"id":"call_1","arguments":"{\"query\":\"stub\"}"}]}
 ```
 
-When telemetry is enabled (`X-Telemetry` header set to `basic`/`verbose`), the response also includes:
+When telemetry is enabled (`X-Telemetry` header set to `basic`/`verbose`/`trace`), the response also includes:
 
 ```
 X-Telemetry-Stream-Url: /v1/telemetry/stream?runId=run_123
@@ -87,8 +91,10 @@ Streams telemetry events (e.g., `telemetry.llm.request`, `telemetry.llm.response
 
 ```
 event: telemetry.llm.request
-data: {"runId":"run_123","model":"gpt-4o","stream":true}
+data: {"provider":"openai","model":"gpt-4o","endpoint":"/v1/responses","request_id":"req-123","headers":{"X-Tenant-Id":"tenant-1","X-Correlation-Id":"corr-456"},"body_preview":"{\"model\":\"gpt-4o\",\"input\":[{\"role\":\"user\",\"content\":\"hello\"}]}"}
 ```
+
+See `docs/TELEMETRY.md` for a full event catalog and configuration details.
 
 ## Examples
 

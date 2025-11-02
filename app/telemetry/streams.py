@@ -6,16 +6,14 @@ from typing import Any, Dict, Iterable, Tuple
 
 # Legacy runtime events that should be normalized to the official Responses names.
 _LEGACY_EVENT_MAP: Dict[str, str] = {
-    "response.tool_call.arguments.delta": "response.function_call_arguments.delta",
-    "response.tool_calls.arguments.delta": "response.function_call_arguments.delta",
-    "response.tool_call.arguments.done": "response.function_call_arguments.done",
-    "response.tool_calls.arguments.done": "response.function_call_arguments.done",
+    "response.function_call_arguments.delta": "response.tool_call.arguments.delta",
+    "response.tool_calls.arguments.delta": "response.tool_call.arguments.delta",
+    "response.function_call_arguments.done": "response.tool_call.arguments.done",
+    "response.tool_calls.arguments.done": "response.tool_call.arguments.done",
 }
 
 # Aliases we continue to emit for downstream compatibility while clients migrate.
 _EVENT_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "response.function_call_arguments.delta": ("response.tool_call.arguments.delta",),
-    "response.function_call_arguments.done": ("response.tool_call.arguments.done",),
     "response.tool_result.created": ("response.tool_call.result.created",),
     "response.tool_result.done": ("response.tool_call.result.done",),
 }

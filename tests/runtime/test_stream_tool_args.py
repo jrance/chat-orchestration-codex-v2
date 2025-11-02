@@ -5,19 +5,19 @@ def test_arguments_assembly_done_tail_only():
     call = PendingFunctionCall(index=0)
     call.update(
         {
-            "type": "response.function_call_arguments.delta",
+            "type": "response.tool_call.arguments.delta",
             "arguments": '{"query":"latest Ukraine',
         }
     )
     call.update(
         {
-            "type": "response.function_call_arguments.delta",
+            "type": "response.tool_call.arguments.delta",
             "arguments": ' news","vertical":"news"}',
         }
     )
     call.update(
         {
-            "type": "response.function_call_arguments.done",
+            "type": "response.tool_call.arguments.done",
             "arguments": "}",
         }
     )

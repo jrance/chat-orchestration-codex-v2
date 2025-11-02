@@ -7,14 +7,16 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from app.telemetry.models import TelemetryEvent, TelemetryLevel, redact_payload
+from app.api.models import TelemetryRedactionMode
+from app.telemetry.models import TelemetryEvent, TelemetryLevel
 
 
 @dataclass(slots=True)
 class TelemetryStreamConfig:
     run_id: str
     level: TelemetryLevel
-    redact: bool
+    redaction: TelemetryRedactionMode
+    payload_max_chars: int = 0
 
 
 class TelemetryStreamer:
@@ -32,11 +34,7 @@ class TelemetryStreamer:
     async def publish(self, event: TelemetryEvent) -> None:
         if not self.enabled():
             return
-        sanitized = TelemetryEvent(
-            event=event.event,
-            payload=redact_payload(event.payload, self.config.redact),
-        )
-        await self._queue.put(sanitized)
+        await self._queue.put(event)
 
     async def stream(self) -> AsyncIterator[TelemetryEvent]:
         self._has_consumer = True

@@ -151,8 +151,8 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
         headers={"X-Tenant-Id": "tenant-1", "X-Telemetry": TelemetryLevel.BASIC.value},
     )
     telemetry_payload = (await telemetry_response.aread()).decode()
-    assert "event: telemetry.run_started" in telemetry_payload
-    assert "event: telemetry.run_completed" in telemetry_payload
+    assert "event: telemetry.span.start" in telemetry_payload
+    assert "event: telemetry.span.end" in telemetry_payload
 
 @pytest.mark.anyio
 async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, async_client: AsyncClient):
@@ -166,18 +166,49 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
         # Make sure we yield something immediately so headers can flush
         yield {"type": "response.created"}
         yield {
-            "type": "response.function_call_arguments.delta",
-            "id": "call-1", "name": "echo",
+            "type": "response.tool_call.arguments.delta",
+            "tool_call_id": "call-1",
+            "name": "echo",
             "arguments": '{"text":"hi"}',
+            "index": 0,
         }
         yield {
-            "type": "response.function_call_arguments.done",
-            "id": "call-1", "name": "echo",
+            "type": "response.tool_call.arguments.done",
+            "tool_call_id": "call-1",
+            "name": "echo",
+            "index": 0,
         }
         # If your server emits tool_result.created/done, simulate them too:
-        yield {"type": "response.tool_result.created", "name": "echo", "call_id": "call-1"}
-        yield {"type": "response.tool_result.done", "name": "echo", "call_id": "call-1", "result": {"echo": "hi"}}
-        yield {"type": "response.completed", "output_text": "", "usage": {"output_tokens": 1}}
+        yield {
+            "type": "response.tool_result.created",
+            "name": "echo",
+            "tool_call_id": "call-1",
+            "index": 0,
+            "function_name": "echo",
+        }
+        yield {
+            "type": "response.tool_result.delta",
+            "name": "echo",
+            "tool_call_id": "call-1",
+            "index": 0,
+            "output": "hi",
+            "preview": True,
+        }
+        yield {
+            "type": "response.tool_result.done",
+            "name": "echo",
+            "tool_call_id": "call-1",
+            "index": 0,
+            "output": {"echo": "hi"},
+        }
+        yield {
+            "type": "response.completed",
+            "output_text": "",
+            "usage": {"output_tokens": 1},
+            "tool_calls": [
+                {"id": "call-1", "arguments": '{"text":"hi"}', "index": 0, "name": "echo"}
+            ],
+        }
 
     monkeypatch.setattr(engine_mod, "stream_codeless", _fake_stream)
     assert engine_mod.stream_codeless is _fake_stream  # sanity

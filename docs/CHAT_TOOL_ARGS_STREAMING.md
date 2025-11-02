@@ -1,26 +1,63 @@
-# Chat Tool Arguments In Streaming
+# Streaming Tool Calls
 
-OpenAI-style chat streaming delivers tool call arguments as _incremental_ string deltas. Each SSE frame may contain a tiny fragment such as `"{"`, `"query"`, or `"}"`. Joining the pieces before the turn is finished produces invalid JSON and leads to decoding errors.
+The Responses stream now emits canonical tool-call events that make argument and
+result handling deterministic for the UI:
 
-## Bad: parse per-fragment
+```
+event: response.tool_call.arguments.delta
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","arguments":"{\"query\":\"latest"}
 
-```python
-for delta in stream:
-    if "tool_calls" in delta:
-        args_fragment = delta["tool_calls"][0]["function"]["arguments"]
-        json.loads(args_fragment)  # raises on `"query"`
+event: response.tool_call.arguments.delta
+data: {"tool_call_id":"call_1","index":0,"arguments":" news on Ukraine\""}
+
+event: response.tool_call.arguments.done
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","arguments":"{\"query\":\"latest news on Ukraine\"}"}
+
+event: response.completed
+data: { ..., "tool_calls": [{"id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","arguments":"{\"query\":\"latest news on Ukraine\"}"}] }
 ```
 
-## Good: buffer until finish
+Key changes:
 
-```python
-buffers[index].write(args_fragment)
-...
-if finish_reason == "tool_calls":
-    full_json = buffers[index].getvalue()
-    arguments = json.loads(full_json)
+- **Canonical namespace** – only `response.tool_call.arguments.delta|done` are emitted.
+  Legacy `response.function_call_arguments.*` events have been removed.
+- **Automatic aggregation** – the runtime buffers all deltas per `tool_call_id` and
+  replaces the final `.done` payload with the complete JSON string. The same
+  string is persisted in `response.completed.tool_calls[*].arguments` so the UI
+  can render the final tool card even after the stream closes.
+- **Stable metadata** – every payload includes the tool’s `index`, stable `id`,
+  sanitized `function_name`, and original `name` when provided.
+
+## Result previews
+
+Tool results now stream alongside arguments:
+
+```
+event: response.tool_result.created
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","result_count":3}
+
+event: response.tool_result.delta
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","preview":true,"output":"Top headline 1\nTop headline 2\n","truncated":false}
+
+event: response.tool_result.done
+data: {"tool_call_id":"call_1","index":0,"name":"tool:search","function_name":"tool_search","output":[{"title":"..."}, ...]}
 ```
 
-The engine now keeps one buffer per `(index, id)` pair, waits for `finish_reason == "tool_calls"`, and only then parses the final string. A lightweight bracket-balance guard catches providers that omit the finish reason but still emit complete JSON.
+- Non-redacted results stream a preview chunk via `response.tool_result.delta`
+  capped by `TOOL_RESULT_MAX_CHARS`. The final `.done` event carries the full
+  JSON payload.
+- Redacted results emit `result_preview` on `response.tool_result.created` so the
+  UI can still display summary metadata even when the output body is omitted.
 
-Remember that the model receives **sanitized** function names (see `docs/OPENAI_CHAT_TOOLS.md`). Use the reverse map to translate the sanitized name back to the internal tool id before executing the call.
+## Handling guidance
+
+- Buffer argument deltas keyed by `tool_call_id` until `.done` arrives, then parse
+  the final JSON string. The engine guarantees that `.done` will contain a fully
+  balanced payload.
+- Update existing UI listeners to read `response.completed.tool_calls` instead of
+  recomputing argument strings from earlier frames.
+- When rendering result previews, prefer the `.delta` chunks when present;
+  otherwise fall back to the `result_preview` field on `.created`.
+
+See `docs/TELEMETRY.md` for details on telemetry events that accompany tool
+invocation and result publication.

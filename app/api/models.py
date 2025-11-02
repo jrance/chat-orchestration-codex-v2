@@ -27,6 +27,7 @@ class TelemetryLevel(str, Enum):
     NONE = "none"
     BASIC = "basic"
     VERBOSE = "verbose"
+    TRACE = "trace"
 
     @classmethod
     def from_raw(cls, raw: str | None) -> "TelemetryLevel":
@@ -37,12 +38,40 @@ class TelemetryLevel(str, Enum):
         except ValueError:
             return cls.NONE
 
+    def allows_payloads(self) -> bool:
+        """Return True when the level should emit payload previews."""
+        return self in {TelemetryLevel.VERBOSE, TelemetryLevel.TRACE}
+
+    def allows_full_payloads(self) -> bool:
+        """Return True when the level should emit full payloads (subject to redaction)."""
+        return self is TelemetryLevel.TRACE
+
+
+class TelemetryRedactionMode(str, Enum):
+    """Telemetry redaction policies."""
+
+    SAFE = "safe"
+    FULL = "full"
+    NONE = "none"
+
+    @classmethod
+    def from_raw(cls, raw: str | None) -> "TelemetryRedactionMode":
+        if not raw:
+            return cls.SAFE
+        try:
+            return cls(raw.strip().lower())
+        except ValueError:
+            return cls.SAFE
+
 
 class ExecutionHeaders(BaseModel):
     """Canonical representation of the inbound execution headers."""
 
     tenant_id: str | None = None
     telemetry: TelemetryLevel = Field(default=TelemetryLevel.NONE)
+    telemetry_override: bool = Field(default=False, exclude=True)
+    telemetry_redaction: TelemetryRedactionMode = Field(default=TelemetryRedactionMode.SAFE)
+    telemetry_redaction_override: bool = Field(default=False, exclude=True)
     correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: str = Field(default_factory=_default_timestamp)
@@ -58,12 +87,20 @@ class ExecutionHeaders(BaseModel):
             return value
         return TelemetryLevel.from_raw(str(value))
 
+    @field_validator("telemetry_redaction", mode="before")
+    @classmethod
+    def _coerce_telemetry_redaction(cls, value: Any) -> TelemetryRedactionMode:
+        if value is None or value == "":
+            return TelemetryRedactionMode.SAFE
+        if isinstance(value, TelemetryRedactionMode):
+            return value
+        return TelemetryRedactionMode.from_raw(str(value))
+
     @classmethod
     def from_request(cls, request: Request) -> "ExecutionHeaders":
         headers = request.headers
         data: Dict[str, Any] = {
             "tenant_id": headers.get("X-Tenant-Id") or headers.get("X-Tenant-ID"),
-            "telemetry": TelemetryLevel.from_raw(headers.get("X-Telemetry")),
             "client_id": headers.get("X-Client-Id") or headers.get("X-Client-ID"),
             "extra_headers": {
                 name: value
@@ -71,6 +108,16 @@ class ExecutionHeaders(BaseModel):
                 if name.startswith("X-Extra-")
             },
         }
+
+        telemetry_raw = headers.get("X-Telemetry")
+        if telemetry_raw is not None:
+            data["telemetry"] = TelemetryLevel.from_raw(telemetry_raw)
+            data["telemetry_override"] = True
+
+        redaction_raw = headers.get("X-Telemetry-Redact")
+        if redaction_raw is not None:
+            data["telemetry_redaction"] = TelemetryRedactionMode.from_raw(redaction_raw)
+            data["telemetry_redaction_override"] = True
 
         correlation = headers.get("X-Correlation-Id") or headers.get("X-Correlation-ID")
         if correlation:
@@ -103,4 +150,10 @@ class ToolResultPayload(BaseModel):
     output: Any
 
 
-__all__ = ["ExecutionHeaders", "TelemetryLevel", "ToolCallPayload", "ToolResultPayload"]
+__all__ = [
+    "ExecutionHeaders",
+    "TelemetryLevel",
+    "TelemetryRedactionMode",
+    "ToolCallPayload",
+    "ToolResultPayload",
+]

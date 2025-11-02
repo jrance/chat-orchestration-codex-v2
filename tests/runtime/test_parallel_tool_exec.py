@@ -92,7 +92,7 @@ async def test_parallel_tool_execution_order(monkeypatch: pytest.MonkeyPatch):
         if call_counter["count"] == 1:
             yield {"type": "response.created"}
             yield {
-                "type": "response.function_call_arguments.delta",
+                "type": "response.tool_call.arguments.delta",
                 "tool_call_id": "call_fast",
                 "name": "fast_tool",
                 "function_name": "fast_tool_fn",
@@ -100,7 +100,7 @@ async def test_parallel_tool_execution_order(monkeypatch: pytest.MonkeyPatch):
                 "index": 0,
             }
             yield {
-                "type": "response.function_call_arguments.delta",
+                "type": "response.tool_call.arguments.delta",
                 "tool_call_id": "call_slow",
                 "name": "slow_tool",
                 "function_name": "slow_tool_fn",
@@ -108,14 +108,14 @@ async def test_parallel_tool_execution_order(monkeypatch: pytest.MonkeyPatch):
                 "index": 1,
             }
             yield {
-                "type": "response.function_call_arguments.done",
+                "type": "response.tool_call.arguments.done",
                 "tool_call_id": "call_fast",
                 "name": "fast_tool",
                 "function_name": "fast_tool_fn",
                 "index": 0,
             }
             yield {
-                "type": "response.function_call_arguments.done",
+                "type": "response.tool_call.arguments.done",
                 "tool_call_id": "call_slow",
                 "name": "slow_tool",
                 "function_name": "slow_tool_fn",

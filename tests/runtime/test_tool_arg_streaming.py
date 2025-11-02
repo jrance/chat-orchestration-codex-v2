@@ -28,7 +28,7 @@ def test_accumulates_argument_fragments_without_ids():
     # initial chunk carries identifier with empty args
     calls.upsert(
         {
-            "type": "response.function_call_arguments.delta",
+            "type": "response.tool_call.arguments.delta",
             "id": "call_123",
             "function_name": "tool_ddgs_search",
             "arguments": "",
@@ -71,13 +71,13 @@ def test_accumulates_argument_fragments_without_ids():
         '"}',
     ]
     for part in fragments:
-        calls.upsert(
-            {
-                "type": "response.function_call_arguments.delta",
-                "function_name": "tool_ddgs_search",
-                "arguments": part,
-            }
-        )
+            calls.upsert(
+                {
+                    "type": "response.tool_call.arguments.delta",
+                    "function_name": "tool_ddgs_search",
+                    "arguments": part,
+                }
+            )
 
     plan = calls.to_plan(_build_runtime(), turn_finished=True)
     assert len(plan) == 1
@@ -90,7 +90,7 @@ def test_done_event_replaces_buffer_with_final_mapping():
     calls = PendingToolCalls()
     calls.upsert(
         {
-            "type": "response.function_call_arguments.delta",
+            "type": "response.tool_call.arguments.delta",
             "id": "call_456",
             "function_name": "tool_ddgs_search",
             "arguments": '{"query":"incomplete"}',
@@ -99,7 +99,7 @@ def test_done_event_replaces_buffer_with_final_mapping():
     final_arguments = {"query": "latest news", "vertical": "news"}
     calls.upsert(
         {
-            "type": "response.function_call_arguments.done",
+            "type": "response.tool_call.arguments.done",
             "id": "call_456",
             "function_name": "tool_ddgs_search",
             "arguments": final_arguments,
@@ -116,7 +116,7 @@ def test_duplicate_final_json_recovers_last_object():
     calls = PendingToolCalls()
     calls.upsert(
         {
-            "type": "response.function_call_arguments.delta",
+            "type": "response.tool_call.arguments.delta",
             "id": "call_789",
             "function_name": "tool_ddgs_search",
             "arguments": "",
@@ -125,7 +125,7 @@ def test_duplicate_final_json_recovers_last_object():
     duplicate_payload = '{"foo": 1}{"foo": 2}'
     calls.upsert(
         {
-            "type": "response.function_call_arguments.done",
+            "type": "response.tool_call.arguments.done",
             "id": "call_789",
             "function_name": "tool_ddgs_search",
             "arguments": duplicate_payload,

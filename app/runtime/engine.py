@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from app.api.deps import ExecutionContext
 from app.api.models import ExecutionHeaders
+from app.config.settings import settings
 from app.compiler.registry import get as get_compiled_graph
 from app.compiler.types import OrchestratorState
 from app.ir.loader import build_runtime_plan
@@ -28,10 +29,12 @@ from app.runtime.patterns.concurrent import build_concurrent_runner
 from app.runtime.patterns.groupchat import build_groupchat_runner
 from app.runtime.state import Checkpoint, RunStatus, get_checkpointer
 from app.runtime.state_store import RunStateRecord, get_run_state_store
-from app.telemetry.models import TelemetryEvent, TelemetryLevel
+from app.telemetry.models import TelemetryEvent
 from app.telemetry.streams import alias_event_types, canonical_event_type, response_event
+from app.telemetry.emitter import TelemetryEmitter
 from app.sse.events import tool_event, tool_result_event
 from app.telemetry.streamer import TelemetryStreamer
+from app.sse.streams import ToolArgBuffer
 
 
 @dataclass(slots=True)
@@ -89,6 +92,53 @@ def _usage(text_in: str, text_out: str) -> Dict[str, int]:
         "input_tokens": max(1, len(text_in.split())) if text_in else 0,
         "output_tokens": max(1, len(text_out.split())) if text_out else 0,
     }
+
+
+def _stringify_tool_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, (bytes, bytearray)):
+        try:
+            return output.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+    try:
+        return json.dumps(output, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return str(output)
+
+
+def _truncate_text(text: str, max_chars: int) -> tuple[str, int]:
+    if max_chars <= 0:
+        return "", len(text)
+    if len(text) <= max_chars:
+        return text, 0
+    removed = len(text) - max_chars
+    return f"{text[:max_chars]}[truncated {removed} chars]", removed
+
+
+def _tool_result_preview(output: Any, max_chars: int) -> Dict[str, Any]:
+    if isinstance(output, Mapping):
+        keys = list(output.keys())
+        summary_keys = keys[:5]
+        return {
+            "type": "object",
+            "count": len(keys),
+            "keys": summary_keys,
+        }
+    if isinstance(output, Sequence) and not isinstance(output, (str, bytes, bytearray)):
+        return {
+            "type": "list",
+            "count": len(output),
+        }
+    text = _stringify_tool_output(output)
+    preview, removed = _truncate_text(text, max_chars)
+    summary: Dict[str, Any] = {"type": "text", "preview": preview}
+    if removed:
+        summary["truncated"] = removed
+    return summary
 
 
 def _coerce_thread_id(
@@ -630,6 +680,13 @@ async def run_stream(
 
     context.ensure_run_ids()
 
+    telemetry_policy = getattr(context, "telemetry", None)
+    emitter = TelemetryEmitter(telemetry, telemetry_policy)
+    turn_span_id = context.run_id or uuid.uuid4().hex
+    turn_started_at = time.perf_counter()
+    span_status = "completed"
+    last_usage: Dict[str, int] = {}
+
     ok, plan, errors = build_runtime_plan(ir, runtime_vars={})
     if not ok:
         message = "; ".join(errors) if errors else "Failed to build runtime plan"
@@ -643,18 +700,17 @@ async def run_stream(
     runtime_concurrent = plan.get("runtimeConcurrent") or {}
     runtime_groupchat = plan.get("runtimeGroupchat") or {}
 
+    span_metadata: Dict[str, Any] = {"entry_id": entry_id}
+    tenant_id = context.headers.tenant_id
+    if tenant_id:
+        span_metadata["tenant_id"] = tenant_id
+    if emitter.enabled():
+        await emitter.emit_span_start(turn_span_id, name="runtime.turn", metadata=span_metadata)
+
     initial_state: OrchestratorState = {"messages": []}
     user_message = _user_message_from_input(user_input)
     if user_message:
         initial_state["messages"] = [user_message]
-
-    if telemetry and telemetry.enabled():
-        await telemetry.publish(
-            TelemetryEvent(
-                event="telemetry.run_started",
-                payload={"runId": context.run_id, "nodeCount": len(ir.get("nodes", []))},
-            )
-        )
 
     token = set_runtime_context(RuntimeContext(execution=context, telemetry=telemetry))
     try:
@@ -678,6 +734,8 @@ async def run_stream(
             final_text = str(agent_entry.get("last_output_text") or "")
             usage_payload = agent_entry.get("usage")
             usage = dict(usage_payload) if isinstance(usage_payload, Mapping) else _usage(_flatten_input(user_input), final_text)
+            if isinstance(usage, Mapping):
+                last_usage = {str(k): int(v) for k, v in usage.items() if isinstance(v, (int, float))}
             concurrent_payload = (scratch.get("concurrent") or {}).get(entry_id) or {}
             chosen_meta = concurrent_payload.get("chosen") if isinstance(concurrent_payload, Mapping) else None
             if isinstance(concurrent_payload, Mapping):
@@ -750,6 +808,8 @@ async def run_stream(
             final_text = str(agent_entry.get("last_output_text") or "")
             usage_payload = agent_entry.get("usage")
             usage = dict(usage_payload) if isinstance(usage_payload, Mapping) else _usage(_flatten_input(user_input), final_text)
+            if isinstance(usage, Mapping):
+                last_usage = {str(k): int(v) for k, v in usage.items() if isinstance(v, (int, float))}
             groupchat_payload = agent_entry.get("groupchat")
             if not isinstance(groupchat_payload, Mapping):
                 groupchat_payload = (scratch.get("groupchat") or {}).get(entry_id) or {}
@@ -815,6 +875,9 @@ async def run_stream(
             )
             current_state: OrchestratorState = {"messages": copy.deepcopy(conversation_messages)}
             tool_calls_executed = 0
+            tool_args_buffer = ToolArgBuffer()
+            finalized_tool_calls: Dict[str, Dict[str, Any]] = {}
+            result_char_limit = max(0, int(getattr(settings, "tool_result_max_chars", 4096)))
 
             def _result_count(payload: Any) -> int | None:
                 if isinstance(payload, Mapping):
@@ -861,12 +924,60 @@ async def run_stream(
                             assistant_finish_reason = finish_value
                         elif data.get("tool_calls"):
                             assistant_finish_reason = assistant_finish_reason or "tool_calls"
+                        if finalized_tool_calls:
+                            ordered_tool_calls = sorted(
+                                finalized_tool_calls.values(),
+                                key=lambda item: item.get("index", 0),
+                            )
+                            data["tool_calls"] = ordered_tool_calls
+                            response_block = data.get("response")
+                            if isinstance(response_block, Mapping):
+                                response_mutable = dict(response_block)
+                            else:
+                                response_mutable = {}
+                            response_mutable["tool_calls"] = ordered_tool_calls
+                            data["response"] = response_mutable
 
-                    if canonical_type in {
-                        "response.function_call_arguments.delta",
-                        "response.function_call_arguments.done",
-                    }:
+                    if canonical_type == "response.tool_call.arguments.delta":
+                        entry = tool_args_buffer.append_delta(data)
+                        data.setdefault("tool_call_id", entry.tool_call_id)
+                        data.setdefault("index", entry.index)
+                        if entry.name and "name" not in data:
+                            data["name"] = entry.name
+                        if entry.function_name and "function_name" not in data:
+                            data["function_name"] = entry.function_name
                         pending_calls.upsert(data)
+                    elif canonical_type == "response.tool_call.arguments.done":
+                        entry = tool_args_buffer.finalize(data)
+                        combined_arguments = entry.finalized()
+                        data["arguments"] = combined_arguments
+                        data.setdefault("tool_call_id", entry.tool_call_id)
+                        data.setdefault("index", entry.index)
+                        if entry.name:
+                            data.setdefault("name", entry.name)
+                        if entry.function_name:
+                            data.setdefault("function_name", entry.function_name)
+                        finalized_tool_calls[entry.tool_call_id] = {
+                            "id": entry.tool_call_id,
+                            "index": entry.index,
+                            "name": entry.name or "",
+                            "function_name": entry.function_name or "",
+                            "arguments": combined_arguments,
+                        }
+                        pending_calls.upsert(data)
+
+                    usage_block = data.get("usage")
+                    if not isinstance(usage_block, Mapping):
+                        response_section = data.get("response")
+                        if isinstance(response_section, Mapping):
+                            usage_block = response_section.get("usage")
+                    if isinstance(usage_block, Mapping):
+                        usage_snapshot: Dict[str, int] = {}
+                        for key, value in usage_block.items():
+                            if isinstance(value, (int, float)):
+                                usage_snapshot[str(key)] = int(value)
+                        if usage_snapshot:
+                            last_usage = usage_snapshot
 
                     events_to_emit: List[Dict[str, Any]] = []
 
@@ -943,6 +1054,17 @@ async def run_stream(
                         data={**base_data, "status": "running"},
                     )
                     yield RunStreamEvent(event=created_event["type"], data=created_event)
+                    if emitter.enabled():
+                        await emitter.emit_note(
+                            "tool.start",
+                            detail={
+                                "tool_call_id": plan_item.call_id,
+                                "tool": plan_item.internal_name,
+                                "function": plan_item.sanitized_name,
+                                "index": plan_item.index,
+                            },
+                            level="debug",
+                        )
                     yield RunStreamEvent(event=running_event["type"], data=running_event)
 
                 semaphore = asyncio.Semaphore(max(1, tool_runtime.parallelism))
@@ -977,6 +1099,8 @@ async def run_stream(
                     created_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name}
                     if result_count is not None:
                         created_extra["result_count"] = result_count
+                    if tool_runtime.redact:
+                        created_extra["result_preview"] = _tool_result_preview(raw_output, result_char_limit)
                     created_event = tool_result_event(
                         "response.tool_result.created",
                         index=plan_item.index,
@@ -991,6 +1115,33 @@ async def run_stream(
                     )
                     yield RunStreamEvent(event=created_event["type"], data=created_event)
 
+                    truncated_chars = 0
+                    if not tool_runtime.redact:
+                        output_text = _stringify_tool_output(raw_output)
+                        preview_text, truncated_chars = _truncate_text(output_text, result_char_limit)
+                        if preview_text:
+                            delta_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name, "preview": True}
+                            if truncated_chars:
+                                delta_extra["truncated"] = True
+                                delta_extra["truncated_chars"] = truncated_chars
+                            delta_event = tool_result_event(
+                                "response.tool_result.delta",
+                                index=plan_item.index,
+                                tool_call_id=plan_item.call_id,
+                                tool_name=plan_item.internal_name,
+                                run_id=context.run_id or "",
+                                thread_id=context.thread_id or "",
+                                output=preview_text,
+                                redacted=False,
+                                error=error_flag,
+                                extra=delta_extra,
+                            )
+                            yield RunStreamEvent(event=delta_event["type"], data=delta_event)
+
+                    done_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name}
+                    if truncated_chars:
+                        done_extra["truncated"] = True
+                        done_extra["truncated_chars"] = truncated_chars
                     done_event = tool_result_event(
                         "response.tool_result.done",
                         index=plan_item.index,
@@ -1001,11 +1152,23 @@ async def run_stream(
                         output=None if tool_runtime.redact else raw_output,
                         redacted=tool_runtime.redact,
                         error=error_flag,
-                        extra={"function_name": plan_item.sanitized_name},
+                        extra=done_extra,
                     )
                     yield RunStreamEvent(event=done_event["type"], data=done_event)
 
                     status_text = "error" if error_flag else "completed"
+                    if emitter.enabled():
+                        await emitter.emit_note(
+                            "tool.finish",
+                            detail={
+                                "tool_call_id": plan_item.call_id,
+                                "tool": plan_item.internal_name,
+                                "function": plan_item.sanitized_name,
+                                "index": plan_item.index,
+                                "status": status_text,
+                            },
+                            level="error" if error_flag else "debug",
+                        )
                     delta_data: Dict[str, Any] = {
                         "function_name": plan_item.sanitized_name,
                         "status": status_text,
@@ -1059,16 +1222,19 @@ async def run_stream(
 
                 current_state = {"messages": copy.deepcopy(conversation_messages)}
                 tool_calls_executed += len(plan_items)
+    except Exception:
+        span_status = "error"
+        raise
     finally:
         reset_runtime_context(token)
-
-    if telemetry and telemetry.enabled():
-        await telemetry.publish(
-            TelemetryEvent(
-                event="telemetry.run_completed",
-                payload={"runId": context.run_id, "status": "completed"},
+        if emitter.enabled():
+            duration_ms = max(0.0, (time.perf_counter() - turn_started_at) * 1000.0)
+            await emitter.emit_span_end(
+                turn_span_id,
+                duration_ms=duration_ms,
+                status=span_status,
+                usage=last_usage,
             )
-        )
 
 
 async def run_once(
