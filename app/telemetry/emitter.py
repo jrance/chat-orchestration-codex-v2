@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, MutableMapping, Optional
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Optional
 
 from app.api.deps import TelemetryContext
 from app.telemetry.models import TelemetryEvent
@@ -21,12 +21,16 @@ def _serialize_payload(payload: Any) -> str:
         return repr(payload)
 
 
+TelemetrySink = Callable[[str, Mapping[str, Any]], Awaitable[None]]
+
+
 @dataclass(slots=True)
 class TelemetryEmitter:
     """Helper bound to a streamer/context to emit sanitized telemetry events."""
 
     streamer: Optional[TelemetryStreamer]
     context: Optional[TelemetryContext]
+    sink: Optional[TelemetrySink] = None
 
     def _enabled(self) -> bool:
         return (
@@ -48,7 +52,10 @@ class TelemetryEmitter:
     async def _publish(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if not self._enabled():
             return
-        await self.streamer.publish(TelemetryEvent(event=event_type, payload=dict(payload)))
+        data = dict(payload)
+        if self.sink is not None:
+            await self.sink(event_type, data)
+        await self.streamer.publish(TelemetryEvent(event=event_type, payload=data))
 
     async def emit_span_start(
         self,
@@ -107,6 +114,8 @@ class TelemetryEmitter:
         ctx = self.context
         assert ctx is not None
         payload: MutableMapping[str, Any] = {
+            "channel": "llm",
+            "direction": "request",
             "provider": provider,
             "model": model,
             "endpoint": endpoint,
@@ -118,7 +127,7 @@ class TelemetryEmitter:
             payload["body"] = self._redacted_text(body)
         elif ctx.allows_payload_previews():
             payload["body_preview"] = self._redacted_text(body)
-        await self._publish("telemetry.llm.request", payload)
+        await self._publish("response.telemetry.delta", payload)
 
     async def emit_llm_response(
         self,
@@ -137,6 +146,8 @@ class TelemetryEmitter:
         ctx = self.context
         assert ctx is not None
         payload: MutableMapping[str, Any] = {
+            "channel": "llm",
+            "direction": "response",
             "provider": provider,
             "model": model,
             "status_code": int(status_code),
@@ -153,7 +164,20 @@ class TelemetryEmitter:
             payload["body"] = self._redacted_text(body)
         elif ctx.allows_payload_previews():
             payload["body_preview"] = self._redacted_text(body)
-        await self._publish("telemetry.llm.response", payload)
+        await self._publish("response.telemetry.delta", payload)
+        summary: MutableMapping[str, Any] = {
+            "channel": "llm",
+            "provider": provider,
+            "model": model,
+            "status_code": int(status_code),
+        }
+        if request_id:
+            summary["request_id"] = request_id
+        if latency_ms is not None:
+            summary["latency_ms"] = float(latency_ms)
+        if usage:
+            summary["usage"] = dict(usage)
+        await self._publish("response.telemetry.done", summary)
 
     async def emit_note(
         self,

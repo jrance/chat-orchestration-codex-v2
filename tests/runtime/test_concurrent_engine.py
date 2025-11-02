@@ -114,9 +114,11 @@ async def test_run_stream_concurrent_node_emits_final_output():
     async for event in run_stream(_concurrent_ir(), "question", context, None):
         events.append(event)
 
-    assert events[0].event == "response.created"
-    assert events[-1].event == "response.completed"
-    completed = events[-1].data
+    content_events = [evt for evt in events if not evt.event.startswith("response.telemetry")]
+
+    assert content_events[0].event == "response.created"
+    assert content_events[-1].event == "response.completed"
+    completed = content_events[-1].data
     assert "Beta Agent" in completed["output_text"]
     assert completed["response"]["metadata"]["concurrent"]["chosenNodeId"] == "beta"
 

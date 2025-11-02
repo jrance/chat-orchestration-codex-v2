@@ -1,6 +1,7 @@
 import pytest
 
 from app.api.deps import ExecutionContext, ExecutionHeaders, build_telemetry_context
+from app.api.models import TelemetryLevel
 from app.config.settings import settings
 from app.runtime.agents import codeless as codeless_mod
 from app.runtime.engine import run_stream
@@ -159,4 +160,62 @@ async def test_tool_result_created_contains_preview_when_redacted(monkeypatch: p
     assert not delta_events, "Redacted runs should not emit tool_result.delta"
 
     done_event = next(evt for evt in events if evt.event == "response.tool_result.done")
+    assert done_event.data.get("output") is None
+
+
+@pytest.mark.anyio
+async def test_tool_result_excerpt_present_when_telemetry_verbose(monkeypatch: pytest.MonkeyPatch):
+    runtime = _tool_runtime(redact=True)
+    monkeypatch.setattr(codeless_mod, "_prepare_tool_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(settings, "telemetry_enabled", True, raising=False)
+
+    async def _execute(call, *_args, **_kwargs):
+        return {
+            "id": call["id"],
+            "name": call["name"],
+            "output": "City forecast: rain expected throughout the afternoon with mild winds.",
+        }
+
+    monkeypatch.setattr(codeless_mod, "_execute_tool_call", _execute)
+
+    async def _stream(state, agent_node, prompt, **_kwargs):
+        yield {"type": "response.created"}
+        yield {
+            "type": "response.tool_call.arguments.delta",
+            "tool_call_id": "call_2",
+            "name": "tool:web.search",
+            "function_name": "tool_web_search",
+            "arguments": '{"query":"forecast"}',
+            "index": 0,
+        }
+        yield {
+            "type": "response.tool_call.arguments.done",
+            "tool_call_id": "call_2",
+            "name": "tool:web.search",
+            "function_name": "tool_web_search",
+            "index": 0,
+        }
+        yield {"type": "response.completed", "output_text": "", "usage": {"output_tokens": 0}}
+
+    monkeypatch.setattr("app.runtime.engine.stream_codeless", _stream)
+
+    headers = ExecutionHeaders(
+        tenant_id="tenant-preview",
+        telemetry=TelemetryLevel.VERBOSE,
+        telemetry_override=True,
+        telemetry_redaction_override=False,
+    )
+    context = ExecutionContext(headers=headers)
+    context.ensure_run_ids()
+    context.telemetry = build_telemetry_context(headers)
+
+    events = []
+    async for evt in run_stream(_ir(), "forecast", context, None):
+        events.append(evt)
+
+    created_event = next(evt for evt in events if evt.event == "response.tool_result.created")
+    done_event = next(evt for evt in events if evt.event == "response.tool_result.done")
+
+    assert created_event.data.get("result_excerpt")
+    assert done_event.data.get("result_excerpt")
     assert done_event.data.get("output") is None

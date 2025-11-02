@@ -77,13 +77,16 @@ async def test_run_stream_emits_expected_events():
     async for event in run_stream(_sample_ir(), "hello runtime", context, None):
         events.append(event)
 
-    assert events[0].event == "response.created"
-    assert any(evt.event == "response.output_text.delta" for evt in events)
-    assert events[-1].event == "response.completed"
-    assert any(evt.event == "response.output_text.done" for evt in events)
-    done_index = next(i for i, evt in enumerate(events) if evt.event == "response.output_text.done")
-    assert done_index < len(events) - 1
-    assert events[-1].data["output_text"].startswith("stub")
+
+    content_events = [evt for evt in events if not evt.event.startswith("response.telemetry")]
+
+    assert content_events[0].event == "response.created"
+    assert any(evt.event == "response.output_text.delta" for evt in content_events)
+    assert content_events[-1].event == "response.completed"
+    assert any(evt.event == "response.output_text.done" for evt in content_events)
+    done_index = next(i for i, evt in enumerate(content_events) if evt.event == "response.output_text.done")
+    assert done_index < len(content_events) - 1
+    assert content_events[-1].data["output_text"].startswith("stub")
 
 
 @pytest.mark.anyio

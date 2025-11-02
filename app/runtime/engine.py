@@ -34,7 +34,13 @@ from app.telemetry.streams import alias_event_types, canonical_event_type, respo
 from app.telemetry.emitter import TelemetryEmitter
 from app.sse.events import tool_event, tool_result_event
 from app.telemetry.streamer import TelemetryStreamer
-from app.sse.streams import ToolArgBuffer
+from app.runtime.tool_stream import ToolArgAggregator
+from app.runtime.tools import (
+    safe_tool_result_excerpt,
+    stringify_tool_output,
+    tool_result_preview,
+    truncate_text,
+)
 
 
 @dataclass(slots=True)
@@ -92,53 +98,6 @@ def _usage(text_in: str, text_out: str) -> Dict[str, int]:
         "input_tokens": max(1, len(text_in.split())) if text_in else 0,
         "output_tokens": max(1, len(text_out.split())) if text_out else 0,
     }
-
-
-def _stringify_tool_output(output: Any) -> str:
-    if output is None:
-        return ""
-    if isinstance(output, str):
-        return output
-    if isinstance(output, (bytes, bytearray)):
-        try:
-            return output.decode("utf-8", errors="ignore")
-        except Exception:
-            return ""
-    try:
-        return json.dumps(output, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-    except (TypeError, ValueError):
-        return str(output)
-
-
-def _truncate_text(text: str, max_chars: int) -> tuple[str, int]:
-    if max_chars <= 0:
-        return "", len(text)
-    if len(text) <= max_chars:
-        return text, 0
-    removed = len(text) - max_chars
-    return f"{text[:max_chars]}[truncated {removed} chars]", removed
-
-
-def _tool_result_preview(output: Any, max_chars: int) -> Dict[str, Any]:
-    if isinstance(output, Mapping):
-        keys = list(output.keys())
-        summary_keys = keys[:5]
-        return {
-            "type": "object",
-            "count": len(keys),
-            "keys": summary_keys,
-        }
-    if isinstance(output, Sequence) and not isinstance(output, (str, bytes, bytearray)):
-        return {
-            "type": "list",
-            "count": len(output),
-        }
-    text = _stringify_tool_output(output)
-    preview, removed = _truncate_text(text, max_chars)
-    summary: Dict[str, Any] = {"type": "text", "preview": preview}
-    if removed:
-        summary["truncated"] = removed
-    return summary
 
 
 def _coerce_thread_id(
@@ -681,11 +640,24 @@ async def run_stream(
     context.ensure_run_ids()
 
     telemetry_policy = getattr(context, "telemetry", None)
-    emitter = TelemetryEmitter(telemetry, telemetry_policy)
+    telemetry_queue: asyncio.Queue[RunStreamEvent] = asyncio.Queue()
+
+    async def enqueue_telemetry(event_type: str, payload: Mapping[str, Any]) -> None:
+        if not event_type.startswith("response.telemetry"):
+            return
+        await telemetry_queue.put(
+            RunStreamEvent(
+                event=event_type,
+                data=dict(payload),
+            )
+        )
+
+    emitter = TelemetryEmitter(telemetry, telemetry_policy, sink=enqueue_telemetry)
     turn_span_id = context.run_id or uuid.uuid4().hex
     turn_started_at = time.perf_counter()
     span_status = "completed"
     last_usage: Dict[str, int] = {}
+    final_telemetry_events: List[RunStreamEvent] = []
 
     ok, plan, errors = build_runtime_plan(ir, runtime_vars={})
     if not ok:
@@ -875,9 +847,12 @@ async def run_stream(
             )
             current_state: OrchestratorState = {"messages": copy.deepcopy(conversation_messages)}
             tool_calls_executed = 0
-            tool_args_buffer = ToolArgBuffer()
+            tool_args_aggregator = ToolArgAggregator()
             finalized_tool_calls: Dict[str, Dict[str, Any]] = {}
-            result_char_limit = max(0, int(getattr(settings, "tool_result_max_chars", 4096)))
+            if telemetry_policy is not None:
+                result_char_limit = max(0, int(telemetry_policy.result_max_chars))
+            else:
+                result_char_limit = max(0, int(getattr(settings, "tool_result_max_chars", 4096)))
 
             def _result_count(payload: Any) -> int | None:
                 if isinstance(payload, Mapping):
@@ -903,6 +878,7 @@ async def run_stream(
                     prompt,
                     attached_tools=attached_tools,
                     mcp_servers=mcp_servers,
+                    telemetry_emitter=emitter,
                 ):
                     raw_type = str(payload.get("type") or payload.get("event") or "message")
                     canonical_type = canonical_event_type(raw_type)
@@ -939,32 +915,46 @@ async def run_stream(
                             data["response"] = response_mutable
 
                     if canonical_type == "response.tool_call.arguments.delta":
-                        entry = tool_args_buffer.append_delta(data)
-                        data.setdefault("tool_call_id", entry.tool_call_id)
+                        entry = pending_calls.upsert(data)
+                        tool_call_id_raw = data.get("tool_call_id") or entry.call_id
+                        if not tool_call_id_raw:
+                            raise ValueError("tool_call.arguments.delta missing tool_call_id")
+                        tool_call_id = str(tool_call_id_raw)
+                        tool_args_aggregator.add_delta(tool_call_id, data.get("arguments"))
+                        data["tool_call_id"] = tool_call_id
                         data.setdefault("index", entry.index)
-                        if entry.name and "name" not in data:
-                            data["name"] = entry.name
-                        if entry.function_name and "function_name" not in data:
-                            data["function_name"] = entry.function_name
-                        pending_calls.upsert(data)
+                        if entry.sanitized_name and "name" not in data:
+                            data["name"] = entry.sanitized_name
+                        if entry.internal_name and "function_name" not in data:
+                            data["function_name"] = entry.internal_name
+                        entry = pending_calls.upsert(data)
+                        entry.call_id = tool_call_id
                     elif canonical_type == "response.tool_call.arguments.done":
-                        entry = tool_args_buffer.finalize(data)
-                        combined_arguments = entry.finalized()
+                        entry = pending_calls.upsert(data)
+                        tool_call_id_raw = data.get("tool_call_id") or entry.call_id
+                        if not tool_call_id_raw:
+                            raise ValueError("tool_call.arguments.done missing tool_call_id")
+                        tool_call_id = str(tool_call_id_raw)
+                        combined_arguments = tool_args_aggregator.finalize(
+                            tool_call_id,
+                            data.get("arguments"),
+                        )
                         data["arguments"] = combined_arguments
-                        data.setdefault("tool_call_id", entry.tool_call_id)
+                        data["tool_call_id"] = tool_call_id
                         data.setdefault("index", entry.index)
-                        if entry.name:
-                            data.setdefault("name", entry.name)
-                        if entry.function_name:
-                            data.setdefault("function_name", entry.function_name)
-                        finalized_tool_calls[entry.tool_call_id] = {
-                            "id": entry.tool_call_id,
+                        if entry.sanitized_name:
+                            data.setdefault("name", entry.sanitized_name)
+                        if entry.internal_name:
+                            data.setdefault("function_name", entry.internal_name)
+                        entry = pending_calls.upsert(data)
+                        entry.call_id = tool_call_id
+                        finalized_tool_calls[tool_call_id] = {
+                            "id": tool_call_id,
                             "index": entry.index,
-                            "name": entry.name or "",
-                            "function_name": entry.function_name or "",
+                            "name": (entry.sanitized_name or entry.internal_name or ""),
+                            "function_name": (entry.internal_name or entry.sanitized_name or ""),
                             "arguments": combined_arguments,
                         }
-                        pending_calls.upsert(data)
 
                     usage_block = data.get("usage")
                     if not isinstance(usage_block, Mapping):
@@ -1001,8 +991,24 @@ async def run_stream(
                         alias_payload["type"] = alias_type
                         events_to_emit.append(alias_payload)
 
-                    for item in events_to_emit:
-                        yield RunStreamEvent(event=item["type"], data=item)
+                    while True:
+                        try:
+                            telemetry_event = telemetry_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        else:
+                            yield telemetry_event
+
+                for item in events_to_emit:
+                    yield RunStreamEvent(event=item["type"], data=item)
+
+                while True:
+                    try:
+                        telemetry_event = telemetry_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    else:
+                        yield telemetry_event
 
                 if not tool_runtime.enabled:
                     break
@@ -1095,12 +1101,15 @@ async def run_stream(
                     raw_output = result.get("output")
                     result_count = _result_count(raw_output)
                     error_flag = isinstance(raw_output, Mapping) and bool(raw_output.get("error"))
+                    result_excerpt = safe_tool_result_excerpt(raw_output, telemetry_policy)
 
                     created_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name}
                     if result_count is not None:
                         created_extra["result_count"] = result_count
                     if tool_runtime.redact:
-                        created_extra["result_preview"] = _tool_result_preview(raw_output, result_char_limit)
+                        created_extra["result_preview"] = tool_result_preview(raw_output, result_char_limit)
+                    if result_excerpt:
+                        created_extra["result_excerpt"] = result_excerpt
                     created_event = tool_result_event(
                         "response.tool_result.created",
                         index=plan_item.index,
@@ -1117,8 +1126,8 @@ async def run_stream(
 
                     truncated_chars = 0
                     if not tool_runtime.redact:
-                        output_text = _stringify_tool_output(raw_output)
-                        preview_text, truncated_chars = _truncate_text(output_text, result_char_limit)
+                        output_text = stringify_tool_output(raw_output)
+                        preview_text, truncated_chars = truncate_text(output_text, result_char_limit)
                         if preview_text:
                             delta_extra: Dict[str, Any] = {"function_name": plan_item.sanitized_name, "preview": True}
                             if truncated_chars:
@@ -1142,6 +1151,8 @@ async def run_stream(
                     if truncated_chars:
                         done_extra["truncated"] = True
                         done_extra["truncated_chars"] = truncated_chars
+                    if result_excerpt:
+                        done_extra["result_excerpt"] = result_excerpt
                     done_event = tool_result_event(
                         "response.tool_result.done",
                         index=plan_item.index,
@@ -1235,6 +1246,16 @@ async def run_stream(
                 status=span_status,
                 usage=last_usage,
             )
+            while True:
+                try:
+                    telemetry_event = telemetry_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    final_telemetry_events.append(telemetry_event)
+
+    for telemetry_event in final_telemetry_events:
+        yield telemetry_event
 
 
 async def run_once(

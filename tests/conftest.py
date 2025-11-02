@@ -4,8 +4,14 @@ import copy
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.config.settings import settings
 from app.main import app
 from app.runtime.agents.codeless import LLMResult
+
+
+@pytest.fixture(autouse=True)
+def disable_telemetry(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(settings, "telemetry_enabled", False, raising=False)
 
 
 @pytest.fixture

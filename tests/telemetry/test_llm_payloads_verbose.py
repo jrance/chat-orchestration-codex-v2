@@ -12,6 +12,7 @@ from app.telemetry.streamer import TelemetryStreamConfig, TelemetryStreamer
 @pytest.mark.anyio
 async def test_llm_request_response_emitted_with_previews(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "telemetry_payload_max_chars", 32, raising=False)
+    monkeypatch.setattr(settings, "telemetry_enabled", True, raising=False)
 
     headers = ExecutionHeaders(
         tenant_id="tenant-telemetry",
@@ -74,8 +75,13 @@ async def test_llm_request_response_emitted_with_previews(monkeypatch: pytest.Mo
         await consumer
         reset_runtime_context(token)
 
-    request_event = next(evt for evt in events if evt.event == "telemetry.llm.request")
-    response_event = next(evt for evt in events if evt.event == "telemetry.llm.response")
+    request_event = next(
+        evt for evt in events if evt.event == "response.telemetry.delta" and evt.payload.get("direction") == "request"
+    )
+    response_event = next(
+        evt for evt in events if evt.event == "response.telemetry.delta" and evt.payload.get("direction") == "response"
+    )
+    done_event = next(evt for evt in events if evt.event == "response.telemetry.done")
 
     assert captured_headers["X-Tenant-Id"] == "tenant-telemetry"
     assert "Authorization" not in captured_headers
@@ -89,3 +95,5 @@ async def test_llm_request_response_emitted_with_previews(monkeypatch: pytest.Mo
     assert response_event.payload["status_code"] == 200
     assert response_event.payload["usage"]["output_tokens"] == 3
     assert "body_preview" in response_event.payload
+    assert done_event.payload["channel"] == "llm"
+    assert done_event.payload["model"] == "gpt-4o"

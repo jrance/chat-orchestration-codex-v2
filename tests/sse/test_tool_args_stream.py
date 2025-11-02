@@ -102,3 +102,50 @@ async def test_canonical_tool_argument_events(monkeypatch: pytest.MonkeyPatch):
     tool_calls = completed.data.get("tool_calls", [])
     assert tool_calls
     assert tool_calls[0]["arguments"] == "".join(fragments)
+
+
+@pytest.mark.anyio
+async def test_tool_argument_deltas_fill_missing_ids(monkeypatch: pytest.MonkeyPatch):
+    fragments = ['{"query":"', "weather", '"}']
+
+    async def _stub_stream(state, agent_node, prompt, **_kwargs):
+        yield {"type": "response.created"}
+        yield {
+            "type": "response.tool_call.arguments.delta",
+            "tool_call_id": "call_42",
+            "name": "tool:web.search",
+            "function_name": "tool_web_search",
+            "arguments": fragments[0],
+            "index": 0,
+        }
+        yield {
+            "type": "response.tool_call.arguments.delta",
+            "arguments": fragments[1],
+            "index": 0,
+        }
+        yield {
+            "type": "response.tool_call.arguments.done",
+            "arguments": fragments[2],
+            "index": 0,
+        }
+        yield {"type": "response.completed", "usage": {"output_tokens": 1}}
+
+    monkeypatch.setattr("app.runtime.engine.stream_codeless", _stub_stream)
+
+    context = ExecutionContext(headers=_headers())
+    context.ensure_run_ids()
+    context.telemetry = build_telemetry_context(context.headers)
+
+    events = []
+    async for evt in run_stream(_ir(), "search", context, None):
+        events.append(evt)
+
+    delta_events = [
+        evt for evt in events if evt.event == "response.tool_call.arguments.delta"
+    ]
+    assert len(delta_events) == 2
+    assert all(evt.data["tool_call_id"] == "call_42" for evt in delta_events)
+
+    done_event = next(evt for evt in events if evt.event == "response.tool_call.arguments.done")
+    assert done_event.data["tool_call_id"] == "call_42"
+    assert done_event.data["arguments"] == "".join(fragments)

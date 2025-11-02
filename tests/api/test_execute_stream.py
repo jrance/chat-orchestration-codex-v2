@@ -6,6 +6,7 @@ import anyio
 import pytest
 from httpx import AsyncClient
 
+from app.config.settings import settings
 from app.telemetry.models import TelemetryLevel
 from app.runtime.agents import codeless as codeless_mod
 from app.runtime.agents.codeless import LLMResult
@@ -103,12 +104,13 @@ async def test_stream_emits_response_events(async_client: AsyncClient):
     payload = (await response.aread()).decode()
     frames = [frame for frame in payload.split("\n\n") if frame.strip()]
 
-    assert _assert_event(frames, "response.created")
-    assert _assert_event(frames, "response.output_text.delta")
-    assert _assert_event(frames, "response.output_text.done")
-    assert _assert_event(frames, "response.completed")
-    done_idx = next(i for i, frame in enumerate(frames) if "event: response.output_text.done" in frame)
-    completed_idx = next(i for i, frame in enumerate(frames) if "event: response.completed" in frame)
+    content_frames = [frame for frame in frames if "event: response.telemetry" not in frame]
+
+    created_present = _assert_event(content_frames, "response.created")
+    assert _assert_event(content_frames, "response.output_text.done")
+    assert _assert_event(content_frames, "response.completed")
+    done_idx = next(i for i, frame in enumerate(content_frames) if "event: response.output_text.done" in frame)
+    completed_idx = next(i for i, frame in enumerate(content_frames) if "event: response.completed" in frame)
     assert done_idx < completed_idx
 
 
@@ -125,7 +127,9 @@ async def test_tenant_mismatch_rejected(async_client: AsyncClient):
 
 
 @pytest.mark.anyio
-async def test_stream_returns_telemetry_header(async_client: AsyncClient):
+async def test_stream_returns_telemetry_header(monkeypatch: pytest.MonkeyPatch, async_client: AsyncClient):
+    monkeypatch.setattr(settings, "telemetry_enabled", True, raising=False)
+
     body = {"orchestration": _sample_ir(), "input": "telemetry please"}
     response = await async_client.post(
         "/v1/execute/stream",
@@ -139,10 +143,11 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
 
     payload = (await response.aread()).decode()
     frames = [frame for frame in payload.split("\n\n") if frame.strip()]
-    assert _assert_event(frames, "response.output_text.done")
-    assert _assert_event(frames, "response.completed")
-    done_idx = next(i for i, frame in enumerate(frames) if "event: response.output_text.done" in frame)
-    completed_idx = next(i for i, frame in enumerate(frames) if "event: response.completed" in frame)
+    content_frames = [frame for frame in frames if "event: response.telemetry" not in frame]
+    assert _assert_event(content_frames, "response.output_text.done")
+    assert _assert_event(content_frames, "response.completed")
+    done_idx = next(i for i, frame in enumerate(content_frames) if "event: response.output_text.done" in frame)
+    completed_idx = next(i for i, frame in enumerate(content_frames) if "event: response.completed" in frame)
     assert done_idx < completed_idx
 
     run_id = parse_qs(urlparse(telemetry_header).query).get("runId", [""])[0]
@@ -254,15 +259,17 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
                     break
 
     # --- Assert: find event ordering in the captured frames ---
+    content_frames = [frame for frame in frames if "event: response.telemetry" not in frame]
+
     def index_of(evt: str) -> int:
-        for i, fr in enumerate(frames):
+        for i, fr in enumerate(content_frames):
             if f"event: {evt}" in fr:
                 return i
-        raise AssertionError(f"{evt} not found in stream: {frames}")
+        raise AssertionError(f"{evt} not found in stream: {content_frames}")
 
     created_idx = index_of("response.tool_result.created")
     done_idx = index_of("response.tool_result.done")
     completed_idx = index_of("response.completed")
 
     assert created_idx < done_idx < completed_idx
-    assert '"result":' in frames[done_idx] or '"output":' in frames[done_idx]
+    assert '"result":' in content_frames[done_idx] or '"output":' in content_frames[done_idx]

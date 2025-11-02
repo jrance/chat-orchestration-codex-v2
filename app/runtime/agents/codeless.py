@@ -904,11 +904,17 @@ async def _invoke_with_repairs(
 ) -> Dict[str, Any]:
     attempt = 0
     while True:
-        if telemetry:
+        if telemetry and telemetry.enabled():
             await telemetry.publish(
                 TelemetryEvent(
-                    event="telemetry.llm.request",
-                    payload={"model": body.get("model"), "stream": False, "attempt": attempt + 1},
+                    event="response.telemetry.delta",
+                    payload={
+                        "channel": "llm",
+                        "direction": "request",
+                        "model": body.get("model"),
+                        "stream": False,
+                        "attempt": attempt + 1,
+                    },
                 )
             )
         response = await create_response(body, context_headers=headers)
@@ -923,14 +929,28 @@ async def _invoke_with_repairs(
             attempt += 1
             if attempt > max_repairs:
                 break
-    if telemetry:
+    if telemetry and telemetry.enabled():
+        has_output = bool(_extract_output_text(response))
         await telemetry.publish(
             TelemetryEvent(
-                event="telemetry.llm.response",
+                event="response.telemetry.delta",
                 payload={
+                    "channel": "llm",
+                    "direction": "response",
                     "model": body.get("model"),
                     "attempts": attempt + 1,
-                    "hasOutput": bool(_extract_output_text(response)),
+                    "has_output": has_output,
+                },
+            )
+        )
+        await telemetry.publish(
+            TelemetryEvent(
+                event="response.telemetry.done",
+                payload={
+                    "channel": "llm",
+                    "model": body.get("model"),
+                    "attempts": attempt + 1,
+                    "has_output": has_output,
                 },
             )
         )
@@ -1030,6 +1050,7 @@ async def stream_codeless(
     *,
     attached_tools: Sequence[ToolSpec] | None = None,
     mcp_servers: Mapping[str, Mapping[str, Any]] | None = None,
+    telemetry_emitter: Optional[TelemetryEmitter] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Stream provider events as an async iterator."""
 
@@ -1045,7 +1066,7 @@ async def stream_codeless(
     body["stream"] = True
 
     telemetry_policy = runtime.execution.telemetry if runtime and runtime.execution else None
-    emitter = TelemetryEmitter(telemetry, telemetry_policy)
+    emitter = telemetry_emitter or TelemetryEmitter(telemetry, telemetry_policy)
 
     model_cfg = (agent_node.get("data") or {}).get("model") or {}
     provider_name = str(model_cfg.get("provider") or "openai")

@@ -164,22 +164,26 @@ async def test_parallel_tool_execution_order(monkeypatch: pytest.MonkeyPatch):
     async for event in run_stream(_tool_ir(), "run parallel tools", context, None):
         events.append(event)
 
-    created_events = [evt for evt in events if evt.event == "response.tool_call.created"]
+    content_events = [evt for evt in events if not evt.event.startswith("response.telemetry")]
+
+    created_events = [evt for evt in content_events if evt.event == "response.tool_call.created"]
     assert len(created_events) == 2
     assert {evt.data["index"] for evt in created_events} == {0, 1}
 
-    result_done_events = [evt for evt in events if evt.event == "response.tool_result.done"]
+    result_done_events = [evt for evt in content_events if evt.event == "response.tool_result.done"]
     assert [evt.data["tool_call_id"] for evt in result_done_events] == ["call_fast", "call_slow"]
 
-    delta_events = [evt for evt in events if evt.event == "response.tool_call.delta"]
+    delta_events = [evt for evt in content_events if evt.event == "response.tool_call.delta"]
     statuses = [evt.data.get("status") for evt in delta_events if evt.data.get("status") != "running"]
     assert statuses == ["completed", "completed"]
 
     final_output_index = next(
-        idx for idx, evt in enumerate(events) if evt.event == "response.output_text.delta"
+        idx for idx, evt in enumerate(content_events) if evt.event == "response.output_text.delta"
     )
-    last_tool_event_index = max(idx for idx, evt in enumerate(events) if evt.event.startswith("response.tool"))
+    last_tool_event_index = max(
+        idx for idx, evt in enumerate(content_events) if evt.event.startswith("response.tool")
+    )
     assert final_output_index > last_tool_event_index
 
-    assert events[-1].event == "response.completed"
-    assert events[-1].data["output_text"] == "final answer"
+    assert content_events[-1].event == "response.completed"
+    assert content_events[-1].data["output_text"] == "final answer"
