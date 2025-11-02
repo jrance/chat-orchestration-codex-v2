@@ -147,23 +147,14 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
     assert "event: telemetry.run_started" in telemetry_payload
     assert "event: telemetry.run_completed" in telemetry_payload
 
-
 @pytest.mark.anyio
 async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, async_client: AsyncClient):
     from app.runtime import engine as engine_mod
 
     tool_runtime = codeless_mod.ToolRuntime(
-        specs={},
-        payload=[],
-        policy="Enabled",
-        max_calls=None,
-        timeout_ms=None,
-        parallelism=1,
-        redact=False,
-        enabled=True,
-        mcp_servers={},
-        name_reverse={},
-        sanitized_names={},
+        specs={}, payload=[], policy="Enabled", max_calls=None, timeout_ms=None,
+        parallelism=1, redact=False, enabled=True, mcp_servers={},
+        name_reverse={}, sanitized_names={}
     )
 
     monkeypatch.setattr(engine_mod.codeless_mod, "_prepare_tool_runtime", lambda *args, **kwargs: tool_runtime)
@@ -175,30 +166,34 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
 
     async def _fake_stream(state, agent_node, prompt, **_kwargs):
         yield {"type": "response.created"}
-        yield {
-            "type": "response.function_call_arguments.delta",
-            "id": "call-1",
-            "name": "echo",
-            "arguments": '{"text":"hi"}',
-        }
-        yield {
-            "type": "response.function_call_arguments.done",
-            "id": "call-1",
-            "name": "echo",
-        }
+        yield {"type": "response.function_call_arguments.delta","id":"call-1","name":"echo","arguments":'{"text":"hi"}'}
+        yield {"type": "response.function_call_arguments.done","id":"call-1","name":"echo"}
         yield {"type": "response.completed", "output_text": "", "usage": {"output_tokens": 1}}
 
     monkeypatch.setattr(engine_mod, "stream_codeless", _fake_stream)
 
     body = {"orchestration": _sample_ir(), "input": "invoke tool"}
-    response = await async_client.post(
-        "/v1/execute/stream",
-        json=body,
-        headers={"X-Tenant-Id": "tenant-1"},
-    )
 
-    payload = (await response.aread()).decode()
-    frames = [frame for frame in payload.split("\n\n") if frame.strip()]
+    frames = []
+    async with async_client.stream(
+        "POST", "/v1/execute/stream",
+        json=body,
+        headers={"X-Tenant-Id": "tenant-1"}
+    ) as resp:
+        buf = ""
+        async for chunk in resp.aiter_text():
+            if not chunk:
+                continue
+            buf += chunk
+            # Split complete SSE frames
+            while "\n\n" in buf:
+                frame, buf = buf.split("\n\n", 1)
+                if frame.strip():
+                    frames.append(frame)
+                # As soon as we see completed, we can stop reading
+                if "event: response.completed" in frame:
+                    await resp.aclose()
+                    break
 
     def _index(event_name: str) -> int:
         for idx, frame in enumerate(frames):
@@ -212,5 +207,3 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
 
     assert created_idx < done_idx < completed_idx
     assert '"output":' in frames[done_idx]
-
-
