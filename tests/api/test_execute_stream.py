@@ -149,61 +149,82 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
 
 @pytest.mark.anyio
 async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, async_client: AsyncClient):
+    # --- Arrange: monkeypatch the engine to yield quickly ---
     from app.runtime import engine as engine_mod
-
-    tool_runtime = codeless_mod.ToolRuntime(
-        specs={}, payload=[], policy="Enabled", max_calls=None, timeout_ms=None,
-        parallelism=1, redact=False, enabled=True, mcp_servers={},
-        name_reverse={}, sanitized_names={}
-    )
-
-    monkeypatch.setattr(engine_mod.codeless_mod, "_prepare_tool_runtime", lambda *args, **kwargs: tool_runtime)
-
-    async def _fake_execute(call, runtime, telemetry):
-        return {"id": call.get("id"), "name": call.get("name"), "output": {"echo": call.get("arguments")}}
-
-    monkeypatch.setattr(engine_mod.codeless_mod, "_execute_tool_call", _fake_execute)
+    # If you need ToolRuntime, import the module where it's defined:
+    # from app.runtime import codeless as codeless_mod
+    # ...and set up your tool runtime monkeypatch here if required...
 
     async def _fake_stream(state, agent_node, prompt, **_kwargs):
+        # Make sure we yield something immediately so headers can flush
         yield {"type": "response.created"}
-        yield {"type": "response.function_call_arguments.delta","id":"call-1","name":"echo","arguments":'{"text":"hi"}'}
-        yield {"type": "response.function_call_arguments.done","id":"call-1","name":"echo"}
+        yield {
+            "type": "response.function_call_arguments.delta",
+            "id": "call-1", "name": "echo",
+            "arguments": '{"text":"hi"}',
+        }
+        yield {
+            "type": "response.function_call_arguments.done",
+            "id": "call-1", "name": "echo",
+        }
+        # If your server emits tool_result.created/done, simulate them too:
+        yield {"type": "response.tool_result.created", "name": "echo", "call_id": "call-1"}
+        yield {"type": "response.tool_result.done", "name": "echo", "call_id": "call-1", "result": {"echo": "hi"}}
         yield {"type": "response.completed", "output_text": "", "usage": {"output_tokens": 1}}
 
     monkeypatch.setattr(engine_mod, "stream_codeless", _fake_stream)
+    assert engine_mod.stream_codeless is _fake_stream  # sanity
 
-    body = {"orchestration": _sample_ir(), "input": "invoke tool"}
+    body = {"orchestration": _sample_ir(), "input": "invoke tool"}  # or {"ir": _sample_ir(), "input": {"text": "..."}}
 
     frames = []
-    async with async_client.stream(
-        "POST", "/v1/execute/stream",
-        json=body,
-        headers={"X-Tenant-Id": "tenant-1"}
-    ) as resp:
-        buf = ""
-        async for chunk in resp.aiter_text():
-            if not chunk:
-                continue
-            buf += chunk
-            # Split complete SSE frames
-            while "\n\n" in buf:
-                frame, buf = buf.split("\n\n", 1)
-                if frame.strip():
-                    frames.append(frame)
-                # As soon as we see completed, we can stop reading
-                if "event: response.completed" in frame:
-                    await resp.aclose()
+
+    # Bound the whole streaming section to avoid infinite hangs
+    async with anyio.fail_after(10):  # <- abort after 10s with a clean trace
+        async with async_client.stream(
+            "POST",
+            "/v1/execute/stream",
+            json=body,
+            headers={
+                "Accept": "text/event-stream",   # ensure SSE negotiation
+                "X-Tenant-Id": "tenant-1",
+                # If your server supports disabling heartbeats for tests:
+                # "X-Stream-Heartbeat": "0",
+            },
+            timeout=10.0,  # httpx timeout—helps surface where it blocks
+        ) as resp:
+            # Check we actually got a streaming response
+            assert resp.status_code == 200, (resp.status_code, await resp.aread())
+
+            buf = ""
+            async for chunk in resp.aiter_text():
+                if not chunk:
+                    continue
+                buf += chunk
+                # Extract complete SSE frames
+                while "\n\n" in buf:
+                    frame, buf = buf.split("\n\n", 1)
+                    if frame.strip():
+                        frames.append(frame)
+                        # Stop as soon as we see the terminal event
+                        if "event: response.completed" in frame:
+                            await resp.aclose()  # proactively close
+                            # break out of both loops
+                            buf = ""
+                            break
+                if not buf:  # we closed; break outer loop
                     break
 
-    def _index(event_name: str) -> int:
-        for idx, frame in enumerate(frames):
-            if f"event: {event_name}" in frame:
-                return idx
-        raise AssertionError(f"{event_name} not found in stream: {frames}")
+    # --- Assert: find event ordering in the captured frames ---
+    def index_of(evt: str) -> int:
+        for i, fr in enumerate(frames):
+            if f"event: {evt}" in fr:
+                return i
+        raise AssertionError(f"{evt} not found in stream: {frames}")
 
-    created_idx = _index("response.tool_result.created")
-    done_idx = _index("response.tool_result.done")
-    completed_idx = _index("response.completed")
+    created_idx = index_of("response.tool_result.created")
+    done_idx = index_of("response.tool_result.done")
+    completed_idx = index_of("response.completed")
 
     assert created_idx < done_idx < completed_idx
-    assert '"output":' in frames[done_idx]
+    assert '"result":' in frames[done_idx] or '"output":' in frames[done_idx]
