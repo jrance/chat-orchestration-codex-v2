@@ -47,9 +47,13 @@ async def message_stream(
     """
 
     async def heartbeat() -> AsyncIterator[str]:
-        while True:
-            await asyncio.sleep(heartbeat_interval)
-            yield encode_message(SSEMessage(event="ping", data={}))
+        """Legacy heartbeat generator retained for compatibility with callers outside this module."""
+        try:
+            while True:
+                await asyncio.sleep(heartbeat_interval)
+                yield encode_message(SSEMessage(event="ping", data={}))
+        except asyncio.CancelledError:
+            return
 
     hb_task: asyncio.Task[None] | None = None
     queue: asyncio.Queue[object] = asyncio.Queue()
@@ -64,10 +68,12 @@ async def message_stream(
             queue.put_nowait(_SENTINEL)
 
     async def heartbeat_pump() -> None:
-        async for payload in heartbeat():
-            if done.is_set():
-                return
-            await queue.put(payload)
+        """Emit ping events at a fixed cadence until the stream signals completion via 'done'."""
+        while not done.is_set():
+            try:
+                await asyncio.wait_for(done.wait(), timeout=heartbeat_interval)
+            except asyncio.TimeoutError:
+                await queue.put(encode_message(SSEMessage(event="ping", data={})))
 
     pump_task = asyncio.create_task(pump())
     if heartbeat_interval and heartbeat_interval > 0:
@@ -88,7 +94,7 @@ async def message_stream(
         with suppress(asyncio.CancelledError, Exception):
             pump_task.cancel()
             await pump_task
+        done.set()
         if hb_task is not None:
-            with suppress(asyncio.CancelledError, Exception):
-                hb_task.cancel()
+            with suppress(Exception):
                 await hb_task
