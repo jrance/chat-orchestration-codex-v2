@@ -181,6 +181,9 @@ def reload_settings() -> Settings:
     except Exception:
         pass
     else:
-        reset_clients()
+        try:
+            reset_clients()
+        except Exception:
+            pass
     return settings
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+from contextlib import suppress
 from functools import lru_cache
 from typing import Any, Mapping
 
@@ -61,6 +63,46 @@ def _apply_proxy_kwargs(kwargs: dict[str, Any]) -> None:
     verify = build_ssl_verify()
     kwargs["verify"] = verify
     kwargs["trust_env"] = False
+
+
+def _sync_close_async_client(client: httpx.AsyncClient | None) -> None:
+    """Best-effort close for AsyncClient instances from sync contexts."""
+
+    if client is None:
+        return
+
+    aclose = getattr(client, "aclose", None)
+    if not callable(aclose):
+        close = getattr(client, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        try:
+            task = loop.create_task(aclose())
+        except RuntimeError:
+            task = None
+        if task is None:
+            with suppress(Exception):
+                asyncio.run(aclose())
+            return
+
+        def _drain(fut: asyncio.Future[Any]) -> None:
+            with suppress(Exception):
+                fut.result()
+
+        task.add_done_callback(_drain)
+        return
+
+    with suppress(Exception):
+        asyncio.run(aclose())
 
 
 def _gateway_client_kwargs(*, transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
@@ -126,21 +168,22 @@ def get_token_client() -> httpx.AsyncClient:
 
 def reset_clients() -> None:
     """Reset cached clients (primarily for testing)."""
+
     global _gateway_client, _token_client
+
     for client in (_gateway_client, _token_client):
-        if client is not None:
-            client.close()
+        _sync_close_async_client(client)
+
     _gateway_client = None
     _token_client = None
+
     try:
         from app.http import openai_client as _openai_client
     except Exception:
         return
+
     if getattr(_openai_client, "_client", None) is not None:
-        try:
-            _openai_client._client.close()
-        except Exception:
-            pass
+        _sync_close_async_client(_openai_client._client)
         _openai_client._client = None
 
 
@@ -149,5 +192,6 @@ __all__ = [
     "create_token_client",
     "get_gateway_client",
     "get_token_client",
+    "_sync_close_async_client",
     "reset_clients",
 ]

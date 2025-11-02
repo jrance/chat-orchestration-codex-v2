@@ -868,7 +868,7 @@ async def run_stream(
                     }:
                         pending_calls.upsert(data)
 
-                    events_to_emit: List[Dict[str, Any]] = [data]
+                    events_to_emit: List[Dict[str, Any]] = []
 
                     if (
                         canonical_type == "response.completed"
@@ -882,6 +882,8 @@ async def run_stream(
                         )
                         events_to_emit.append(done_payload)
                         output_done_emitted = True
+
+                    events_to_emit.append(data)
 
                     for alias_type in alias_event_types(canonical_type):
                         alias_payload = dict(data)

@@ -2,6 +2,7 @@ import copy
 import json
 from urllib.parse import parse_qs, urlparse
 
+import anyio
 import pytest
 from httpx import AsyncClient
 
@@ -106,6 +107,9 @@ async def test_stream_emits_response_events(async_client: AsyncClient):
     assert _assert_event(frames, "response.output_text.delta")
     assert _assert_event(frames, "response.output_text.done")
     assert _assert_event(frames, "response.completed")
+    done_idx = next(i for i, frame in enumerate(frames) if "event: response.output_text.done" in frame)
+    completed_idx = next(i for i, frame in enumerate(frames) if "event: response.completed" in frame)
+    assert done_idx < completed_idx
 
 
 @pytest.mark.anyio
@@ -137,6 +141,9 @@ async def test_stream_returns_telemetry_header(async_client: AsyncClient):
     frames = [frame for frame in payload.split("\n\n") if frame.strip()]
     assert _assert_event(frames, "response.output_text.done")
     assert _assert_event(frames, "response.completed")
+    done_idx = next(i for i, frame in enumerate(frames) if "event: response.output_text.done" in frame)
+    completed_idx = next(i for i, frame in enumerate(frames) if "event: response.completed" in frame)
+    assert done_idx < completed_idx
 
     run_id = parse_qs(urlparse(telemetry_header).query).get("runId", [""])[0]
     telemetry_response = await async_client.get(
@@ -180,7 +187,7 @@ async def test_stream_emits_tool_result_events(monkeypatch: pytest.MonkeyPatch, 
     frames = []
 
     # Bound the whole streaming section to avoid infinite hangs
-    async with anyio.fail_after(10):  # <- abort after 10s with a clean trace
+    with anyio.fail_after(10):  # <- abort after 10s with a clean trace
         async with async_client.stream(
             "POST",
             "/v1/execute/stream",

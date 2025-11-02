@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, MutableMapping, Optional, Sequence
 
@@ -159,6 +161,60 @@ def _cancelled_child_result(spec: ConcurrentChildSpec) -> ChildResult:
             "usage": None,
         }
     )
+
+
+def _remaining_time(deadline: float | None) -> float | None:
+    """Return seconds remaining until the provided ``deadline``."""
+
+    if deadline is None:
+        return None
+    remaining = deadline - time.perf_counter()
+    return remaining if remaining > 0 else 0.0
+
+
+async def _timeout_pending_children(
+    pending: MutableMapping[asyncio.Task[ChildResult], ConcurrentChildSpec],
+    *,
+    telemetry: TelemetryStreamer | None,
+    cfg: ConcurrentConfig,
+) -> list[ChildResult]:
+    """Mark pending children as timed out and cancel their tasks."""
+
+    if not pending:
+        return []
+
+    results: list[ChildResult] = []
+    for task, spec in list(pending.items()):
+        pending.pop(task, None)
+        await _publish(
+            telemetry,
+            CONCURRENT_CHILD_TIMEOUT,
+            {"parentId": cfg.node_id, "nodeId": spec.node_id, "label": spec.label},
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    results.append(_timeout_child_result(spec))
+    return results
+
+
+def _ordered_results(results: Sequence[ChildResult], children: Sequence[ConcurrentChildSpec]) -> list[ChildResult]:
+    """Return results ordered to match the configured child sequence."""
+
+    ordered: list[ChildResult] = []
+    remaining = list(results)
+    for spec in children:
+        for index, res in enumerate(remaining):
+            if res.get("nodeId") == spec.node_id:
+                ordered.append(res)
+                remaining.pop(index)
+                break
+    ordered.extend(remaining)
+    return ordered
 
 
 async def _publish(telemetry: TelemetryStreamer | None, event: str, payload: Mapping[str, object]) -> None:
@@ -423,6 +479,9 @@ async def run_concurrent(
 
     limit = cfg.max_parallelism if cfg.max_parallelism and cfg.max_parallelism > 0 else len(children)
     semaphore = asyncio.Semaphore(limit) if limit < len(children) else None
+    deadline: float | None = None
+    if cfg.timeout_seconds and cfg.timeout_seconds > 0:
+        deadline = time.perf_counter() + float(cfg.timeout_seconds)
 
     tasks: MutableMapping[asyncio.Task[ChildResult], ConcurrentChildSpec] = {}
     for spec in children:
@@ -435,10 +494,21 @@ async def run_concurrent(
     if cfg.strategy == "FirstBest":
         threshold = cfg.first_best_threshold
         pending: MutableMapping[asyncio.Task[ChildResult], ConcurrentChildSpec] = dict(tasks)
+        overall_timed_out = False
         while pending:
-            done, _ = await asyncio.wait(list(pending.keys()), return_when=asyncio.FIRST_COMPLETED)
+            wait_timeout = _remaining_time(deadline)
+            done, _ = await asyncio.wait(
+                list(pending.keys()),
+                timeout=wait_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                overall_timed_out = wait_timeout is not None
+                break
             for task in done:
-                spec = pending.pop(task)
+                spec = pending.pop(task, None)
+                if spec is None:
+                    continue
                 result = await _collect_task(task, spec)
                 results.append(result)
                 if result.get("status") == "completed":
@@ -446,10 +516,9 @@ async def run_concurrent(
                     if threshold is None or (confidence is not None and confidence >= threshold):
                         chosen = result
                         if cfg.cancel_remaining_on_decision and pending:
-                            for cancel_task in pending.keys():
-                                cancel_task.cancel()
                             for cancel_task, cancel_spec in list(pending.items()):
                                 pending.pop(cancel_task, None)
+                                cancel_task.cancel()
                                 cancel_result = await _collect_task(cancel_task, cancel_spec)
                                 results.append(cancel_result)
                         pending.clear()
@@ -457,9 +526,20 @@ async def run_concurrent(
             if chosen:
                 break
 
-        for task, spec in list(pending.items()):
-            pending.pop(task, None)
-            results.append(await _collect_task(task, spec))
+        if overall_timed_out and pending:
+            results.extend(
+                await _timeout_pending_children(
+                    pending,
+                    telemetry=telemetry,
+                    cfg=cfg,
+                )
+            )
+        else:
+            for task, spec in list(pending.items()):
+                pending.pop(task, None)
+                results.append(await _collect_task(task, spec))
+
+        results = _ordered_results(results, children)
 
         if chosen is None and results:
             chosen = next((res for res in results if res.get("status") == "completed"), results[0])
@@ -467,8 +547,38 @@ async def run_concurrent(
         merged_text = chosen.get("output_text") if chosen else None
         rationale = None
     else:
-        for task, spec in list(tasks.items()):
-            results.append(await _collect_task(task, spec))
+        pending: MutableMapping[asyncio.Task[ChildResult], ConcurrentChildSpec] = dict(tasks)
+        overall_timed_out = False
+        while pending:
+            wait_timeout = _remaining_time(deadline)
+            done, _ = await asyncio.wait(
+                list(pending.keys()),
+                timeout=wait_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                overall_timed_out = wait_timeout is not None
+                break
+            for task in done:
+                spec = pending.pop(task, None)
+                if spec is None:
+                    continue
+                results.append(await _collect_task(task, spec))
+
+        if overall_timed_out and pending:
+            results.extend(
+                await _timeout_pending_children(
+                    pending,
+                    telemetry=telemetry,
+                    cfg=cfg,
+                )
+            )
+        else:
+            for task, spec in list(pending.items()):
+                pending.pop(task, None)
+                results.append(await _collect_task(task, spec))
+
+        results = _ordered_results(results, children)
 
         if cfg.strategy == "HighestScore":
             completed = [res for res in results if res.get("status") == "completed"]

@@ -50,6 +50,47 @@ class ApigeeTokenProvider:
         self._transport = transport
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _sanitize(value: str | None) -> str:
+        return (value or "").strip()
+
+    @staticmethod
+    def _is_placeholder(value: str) -> bool:
+        lowered = value.lower()
+        return any(marker in lowered for marker in ("replace-me", "changeme", "gateway.example.com"))
+
+    @staticmethod
+    def _resolve_oauth_config() -> tuple[str, str, str, str | None, str | None]:
+        token_url = ApigeeTokenProvider._sanitize(settings.apigee_token_url)
+        client_id = ApigeeTokenProvider._sanitize(settings.apigee_client_id)
+        secret_setting = settings.apigee_client_secret
+        if isinstance(secret_setting, SecretStr):
+            client_secret = secret_setting.get_secret_value()
+        else:
+            client_secret = secret_setting or ""
+        client_secret = ApigeeTokenProvider._sanitize(client_secret)
+
+        if ApigeeTokenProvider._is_placeholder(token_url):
+            token_url = ""
+        if ApigeeTokenProvider._is_placeholder(client_id):
+            client_id = ""
+        if ApigeeTokenProvider._is_placeholder(client_secret):
+            client_secret = ""
+
+        if not token_url or not client_id or not client_secret:
+            raise RuntimeError(
+                "Apigee token configuration missing (APIGEE_TOKEN_URL/CLIENT_ID/CLIENT_SECRET).",
+            )
+
+        scopes_value = ApigeeTokenProvider._sanitize(settings.apigee_scopes)
+        scopes = scopes_value or None
+        audience_value = ApigeeTokenProvider._sanitize(settings.apigee_audience)
+        if ApigeeTokenProvider._is_placeholder(audience_value):
+            audience_value = ""
+        audience = audience_value or None
+
+        return token_url, client_id, client_secret, scopes, audience
+
     async def get_token(self, force_refresh: bool = False) -> str:
         """Return a cached bearer token, refreshing when necessary."""
         if not force_refresh and self._cache.is_valid():
@@ -63,29 +104,15 @@ class ApigeeTokenProvider:
             if api_key:
                 return api_key
 
-            token_url = settings.apigee_token_url
-            client_id = settings.apigee_client_id
-            client_secret_setting = settings.apigee_client_secret
-            if isinstance(client_secret_setting, SecretStr):
-                client_secret = client_secret_setting.get_secret_value()
-            else:
-                client_secret = client_secret_setting
-
-            settings.debug_summary()
-            if not token_url or not client_id or not client_secret:
-                raise RuntimeError(
-                    "Apigee token configuration missing (APIGEE_TOKEN_URL/CLIENT_ID/CLIENT_SECRET).",
-                )
+            token_url, client_id, client_secret, scopes, audience = self._resolve_oauth_config()
 
             form_data: dict[str, str] = {
                 "grant_type": "client_credentials",
                 "client_id": client_id,
                 "client_secret": client_secret,
             }
-            scopes = (settings.apigee_scopes or "").strip()
             if scopes:
                 form_data["scope"] = scopes
-            audience = (settings.apigee_audience or "").strip()
             if audience:
                 form_data["audience"] = audience
 
